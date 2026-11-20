@@ -10,6 +10,10 @@ on:
         description: Deploy this verified artifact to Cloudflare
         type: boolean
         default: false
+      isolated:
+        description: Verify an isolated Worker fixture in the separate validation environment
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -20,7 +24,7 @@ concurrency:
 
 jobs:
   publish:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && !inputs.isolated
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: production
@@ -57,3 +61,27 @@ jobs:
         run: |
           export WRANGLER_BIN="$RUNNER_TEMP/wrangler/node_modules/wrangler/bin/wrangler.js"
           python3 publisher.py
+
+  isolated:
+    if: github.ref == 'refs/heads/main' && inputs.isolated && !inputs.publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: handoff-validation
+    steps:
+      - name: Check out the exact protected workflow revision
+        run: |
+          git init --quiet
+          git fetch --quiet --depth=1 --no-tags "https://github.com/${GITHUB_REPOSITORY}.git" "$GITHUB_SHA"
+          git checkout --quiet --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Verify the isolated private artifact
+        env:
+          HANDOFF_PROFILE: isolated
+          SOURCE_RUN_ID: ${{ inputs.source_run }}
+          SOURCE_REPOSITORY: ${{ secrets.SOURCE_REPOSITORY }}
+          SOURCE_WORKFLOW_BRANCH: ${{ secrets.SOURCE_WORKFLOW_BRANCH }}
+          SOURCE_WORKFLOW_SHA: ${{ secrets.SOURCE_WORKFLOW_SHA }}
+          HANDOFF_ACTIONS_READ: ${{ secrets.HANDOFF_ACTIONS_READ }}
+          WORKER_NAME: ${{ secrets.WORKER_NAME }}
+          WORKER_DATABASE_ID: ${{ secrets.WORKER_DATABASE_ID }}
+        run: python3 publisher.py
