@@ -84,8 +84,8 @@ def select_artifact(read, repository, trusted_sha, run_id, branch='main'):
     return artifact
 
 
-def unpack_verified(data, expected_digest, directory, isolated=False):
-    limit = MAX_ISOLATED_ARCHIVE if isolated else MAX_ARCHIVE
+def unpack_verified(data, expected_digest, directory, extended=False):
+    limit = MAX_ISOLATED_ARCHIVE if extended else MAX_ARCHIVE
     require(len(data) <= limit, 'Artifact archive is too large.')
     digest = 'sha256:' + hashlib.sha256(data).hexdigest()
     require(digest == expected_digest, 'Artifact archive digest differs from GitHub metadata.')
@@ -93,7 +93,7 @@ def unpack_verified(data, expected_digest, directory, isolated=False):
         entries = archive.infolist()
         require(len(entries) <= 250 and sum(entry.file_size for entry in entries) <= limit, 'Artifact contents are too large.')
         worker_files = {'worker.js', 'worker.js.map', 'wrangler.json'}
-        if isolated:
+        if extended:
             worker_files.add('worker.mjs.map')
         files = set()
         for entry in entries:
@@ -113,7 +113,7 @@ def unpack_verified(data, expected_digest, directory, isolated=False):
             with destination.open('xb') as output:
                 output.write(archive.read(entry))
         required = {'worker.js', 'wrangler.json', 'public/index.html'}
-        if isolated:
+        if extended:
             required.update({'public/app.mjs', 'public/sw.js', 'public/manifest.webmanifest'})
         else:
             required.add('public/boot.js')
@@ -152,6 +152,28 @@ def check_isolated_worker(directory, worker, database):
                           'migrations_dir': 'migrations'}]
     } and config['assets']['run_worker_first'] is True and config['workers_dev'] is False and config['preview_urls'] is False,
         'Unexpected isolated Worker target or bindings.')
+    check_installation(directory)
+
+
+def check_bound_worker(directory, worker, database):
+    require(re.fullmatch(r'[a-z0-9][a-z0-9-]*', worker) and not worker.endswith('-ci') and
+            re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', database) and database != FIXTURE_DATABASE,
+            'Missing approved production Worker or D1 binding.')
+    config = json.loads((directory / 'wrangler.json').read_text(encoding='utf-8'))
+    require(re.fullmatch(r'\d{4}-\d{2}-\d{2}', config['compatibility_date']), 'Invalid compatibility date.')
+    require(config == {
+        'name': worker, 'main': 'worker.js', 'compatibility_date': config['compatibility_date'],
+        'assets': {'directory': './public', 'binding': 'ASSETS', 'run_worker_first': True},
+        'workers_dev': True, 'preview_urls': False, 'keep_vars': True,
+        'd1_databases': [{'binding': 'DB', 'database_name': worker, 'database_id': database,
+                          'migrations_dir': 'migrations'}]
+    } and config['assets']['run_worker_first'] is True and config['workers_dev'] is True and
+        config['preview_urls'] is False and config['keep_vars'] is True,
+        'Unexpected production Worker target or bindings.')
+    check_installation(directory)
+
+
+def check_installation(directory):
     manifest = json.loads((directory / 'public' / 'manifest.webmanifest').read_text(encoding='utf-8'))
     require([manifest.get(key) for key in ('id', 'start_url', 'scope')] == ['/', '/', '/'],
             'Unexpected installation identity.')
@@ -159,25 +181,27 @@ def check_isolated_worker(directory, worker, database):
 
 def run():
     profile = os.environ.get('HANDOFF_PROFILE', 'production')
-    require(profile in ('production', 'isolated'), 'Unknown Worker handoff profile.')
+    require(profile in ('production', 'isolated', 'bound-worker'), 'Unknown Worker handoff profile.')
     isolated = profile == 'isolated'
+    extended = profile != 'production'
     require(not isolated or os.environ.get('PUBLISH') != 'true', 'Isolated handoff cannot deploy.')
     token = os.environ['HANDOFF_ACTIONS_READ']
     require(bool(token), 'Private artifact read access has not been configured.')
     repository = os.environ['SOURCE_REPOSITORY']
-    branch = os.environ['SOURCE_WORKFLOW_BRANCH'] if isolated else 'main'
+    branch = os.environ['SOURCE_WORKFLOW_BRANCH'] if extended else 'main'
     artifact = select_artifact(lambda path: github(path, token), repository,
                                os.environ['SOURCE_WORKFLOW_SHA'], os.environ['SOURCE_RUN_ID'], branch)
     data = github(f'/repos/{repository}/actions/artifacts/{artifact["id"]}/zip', token, download=True,
-                  limit=MAX_ISOLATED_ARCHIVE if isolated else MAX_ARCHIVE)
+                  limit=MAX_ISOLATED_ARCHIVE if extended else MAX_ARCHIVE)
     with tempfile.TemporaryDirectory(prefix='verified-worker-') as workspace:
         directory = Path(workspace)
-        unpack_verified(data, artifact['digest'], directory, isolated)
+        unpack_verified(data, artifact['digest'], directory, extended)
         if isolated:
             check_isolated_worker(directory, os.environ['WORKER_NAME'], os.environ['WORKER_DATABASE_ID'])
             print('Verified the isolated private artifact and its synthetic settings.')
             return
-        check_worker(directory, os.environ['WORKER_NAME'], os.environ['WORKER_DATABASE_ID'])
+        verify_worker = check_bound_worker if extended else check_worker
+        verify_worker(directory, os.environ['WORKER_NAME'], os.environ['WORKER_DATABASE_ID'])
         print('Verified the approved private artifact and its deployment settings.')
         if os.environ.get('PUBLISH') != 'true':
             return

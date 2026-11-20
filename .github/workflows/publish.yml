@@ -14,6 +14,10 @@ on:
         description: Verify an isolated Worker fixture in the separate validation environment
         type: boolean
         default: false
+      bound_worker:
+        description: Use the separate production environment for a Worker with an existing D1 binding
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -27,10 +31,12 @@ jobs:
     if: github.ref == 'refs/heads/main' && !inputs.isolated
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    environment: production
+    environment: ${{ inputs.bound_worker && 'bound-worker-production' || 'production' }}
     env:
+      HANDOFF_PROFILE: ${{ inputs.bound_worker && 'bound-worker' || 'production' }}
       SOURCE_RUN_ID: ${{ inputs.source_run }}
       SOURCE_REPOSITORY: ${{ secrets.SOURCE_REPOSITORY }}
+      SOURCE_WORKFLOW_BRANCH: ${{ secrets.SOURCE_WORKFLOW_BRANCH }}
       SOURCE_WORKFLOW_SHA: ${{ secrets.SOURCE_WORKFLOW_SHA }}
       WORKER_NAME: ${{ secrets.WORKER_NAME }}
     steps:
@@ -63,7 +69,7 @@ jobs:
           python3 publisher.py
 
   isolated:
-    if: github.ref == 'refs/heads/main' && inputs.isolated && !inputs.publish
+    if: github.ref == 'refs/heads/main' && inputs.isolated && !inputs.publish && !inputs.bound_worker
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     environment: handoff-validation

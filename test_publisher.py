@@ -163,9 +163,50 @@ class PublisherTests(TestCase):
 
     def test_isolated_worker_rejects_production_configuration_and_oversize_archives(self):
         data = isolated_package(workers_dev=True)
-        publisher.unpack_verified(data, digest(data), self.directory, isolated=True)
+        publisher.unpack_verified(data, digest(data), self.directory, extended=True)
         with self.assertRaisesRegex(publisher.Rejected, 'Unexpected isolated Worker'):
             publisher.check_isolated_worker(self.directory, 'example-ci', publisher.FIXTURE_DATABASE)
         with mock.patch.object(publisher, 'MAX_ISOLATED_ARCHIVE', len(data) - 1):
             with self.assertRaisesRegex(publisher.Rejected, 'archive is too large'):
-                publisher.unpack_verified(data, digest(data), self.directory, isolated=True)
+                publisher.unpack_verified(data, digest(data), self.directory, extended=True)
+
+    def test_bound_worker_checks_existing_binding_and_preserves_vars_before_upload(self):
+        fixture = isolated_package()
+        with ZipFile(io.BytesIO(fixture)) as original:
+            config = json.loads(original.read('wrangler.json'))
+            del config['vars']
+            config.update(name='example', workers_dev=True, keep_vars=True)
+            config['d1_databases'][0].update(database_name='example', database_id=DATABASE)
+            stream = io.BytesIO()
+            with ZipFile(stream, 'w') as archive:
+                for member in original.namelist():
+                    archive.writestr(member, json.dumps(config) if member == 'wrangler.json' else original.read(member))
+        data = stream.getvalue()
+        self.run['head_branch'] = 'example-bound'
+        self.artifacts['artifacts'][0]['digest'] = digest(data)
+        env = {'HANDOFF_PROFILE': 'bound-worker', 'HANDOFF_ACTIONS_READ': 'source-fixture',
+               'SOURCE_REPOSITORY': 'example/private', 'SOURCE_WORKFLOW_SHA': SHA,
+               'SOURCE_WORKFLOW_BRANCH': 'example-bound', 'SOURCE_RUN_ID': '5',
+               'WORKER_NAME': 'example', 'WORKER_DATABASE_ID': DATABASE, 'PATH': 'fixture',
+               'WRANGLER_BIN': '/test/wrangler.js', 'CLOUDFLARE_ACCOUNT_ID': 'account-fixture',
+               'CLOUDFLARE_API_TOKEN': 'upload-fixture'}
+
+        def fetch(path, token, download=False, limit=publisher.MAX_ARCHIVE):
+            return data if download else self.read(path)
+
+        def upload(args, cwd, **options):
+            self.assertIn('--no-bundle', args)
+            self.assertEqual(json.loads((cwd / 'wrangler.json').read_text()), config)
+            return mock.Mock(returncode=0)
+
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(publisher, 'github', side_effect=fetch), \
+                mock.patch.object(publisher.subprocess, 'run', side_effect=upload) as uploader:
+            publisher.run()
+            uploader.assert_not_called()
+            os.environ['PUBLISH'] = 'true'
+            publisher.run()
+            uploader.assert_called_once()
+            os.environ['WORKER_DATABASE_ID'] = 'bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+            with self.assertRaisesRegex(publisher.Rejected, 'Unexpected production Worker'):
+                publisher.run()
+            uploader.assert_called_once()
