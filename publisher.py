@@ -15,6 +15,8 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 API = 'https://api.github.com'
 MAX_ARCHIVE = 16 * 1024 * 1024
+MAX_ISOLATED_ARCHIVE = 32 * 1024 * 1024
+FIXTURE_DATABASE = '00000000-0000-4000-8000-000000000000'
 VERIFIED_STEP = 'Store verified handoff artifact'
 
 
@@ -32,7 +34,7 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def github(path, token, download=False):
+def github(path, token, download=False, limit=MAX_ARCHIVE):
     request = Request(API + path, headers={
         'Authorization': 'Bearer ' + token,
         'Accept': 'application/vnd.github+json',
@@ -49,19 +51,20 @@ def github(path, token, download=False):
     require(urlparse(location).scheme == 'https', 'Invalid artifact download destination.')
     with urlopen(location, timeout=25) as response:
         require(urlparse(response.geturl()).scheme == 'https', 'Invalid artifact download redirect.')
-        data = response.read(MAX_ARCHIVE + 1)
-    require(len(data) <= MAX_ARCHIVE, 'Artifact archive is too large.')
+        data = response.read(limit + 1)
+    require(len(data) <= limit, 'Artifact archive is too large.')
     return data
 
 
-def select_artifact(read, repository, trusted_sha, run_id):
+def select_artifact(read, repository, trusted_sha, run_id, branch='main'):
     require(re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository), 'Missing or invalid private controller repository.')
     require(re.fullmatch(r'[a-f0-9]{40}', trusted_sha), 'Missing or invalid approved controller commit.')
     require(re.fullmatch(r'[1-9][0-9]{0,19}', run_id), 'Invalid workflow run number.')
+    require(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9/_-]*', branch), 'Invalid approved controller branch.')
     run_path = f'/repos/{repository}/actions/runs/{run_id}'
     run = read(run_path)
-    require(str(run['id']) == run_id and run['head_branch'] == 'main' and
-            run['path'] in ('.github/workflows/release.yml', '.github/workflows/release.yml@refs/heads/main') and
+    require(str(run['id']) == run_id and run['head_branch'] == branch and
+            run['path'] in ('.github/workflows/release.yml', f'.github/workflows/release.yml@refs/heads/{branch}') and
             run['event'] == 'workflow_dispatch' and run['status'] == 'completed' and
             run['conclusion'] == 'success' and run['head_sha'] == trusted_sha,
             'Source run is unsuccessful or uses an unapproved controller revision.')
@@ -81,17 +84,22 @@ def select_artifact(read, repository, trusted_sha, run_id):
     return artifact
 
 
-def unpack_verified(data, expected_digest, directory):
+def unpack_verified(data, expected_digest, directory, isolated=False):
+    limit = MAX_ISOLATED_ARCHIVE if isolated else MAX_ARCHIVE
+    require(len(data) <= limit, 'Artifact archive is too large.')
     digest = 'sha256:' + hashlib.sha256(data).hexdigest()
     require(digest == expected_digest, 'Artifact archive digest differs from GitHub metadata.')
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         entries = archive.infolist()
-        require(len(entries) <= 250 and sum(entry.file_size for entry in entries) <= MAX_ARCHIVE, 'Artifact contents are too large.')
+        require(len(entries) <= 250 and sum(entry.file_size for entry in entries) <= limit, 'Artifact contents are too large.')
+        worker_files = {'worker.js', 'worker.js.map', 'wrangler.json'}
+        if isolated:
+            worker_files.add('worker.mjs.map')
         files = set()
         for entry in entries:
             name = entry.filename.rstrip('/')
             parts = name.split('/')
-            allowed = name in {'worker.js', 'worker.js.map', 'wrangler.json'} or (
+            allowed = name in worker_files or (
                 parts[0] == 'public' and all(re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', part) for part in parts))
             kind = stat.S_IFMT(entry.external_attr >> 16)
             require(allowed and kind in (0, stat.S_IFDIR if entry.is_dir() else stat.S_IFREG), 'Unexpected artifact entry.')
@@ -104,7 +112,12 @@ def unpack_verified(data, expected_digest, directory):
             destination.parent.mkdir(parents=True, exist_ok=True)
             with destination.open('xb') as output:
                 output.write(archive.read(entry))
-        require({'worker.js', 'wrangler.json', 'public/index.html', 'public/boot.js'} <= files, 'Required worker files are absent.')
+        required = {'worker.js', 'wrangler.json', 'public/index.html'}
+        if isolated:
+            required.update({'public/app.mjs', 'public/sw.js', 'public/manifest.webmanifest'})
+        else:
+            required.add('public/boot.js')
+        require(required <= files, 'Required worker files are absent.')
 
 
 def check_worker(directory, worker, database):
@@ -120,16 +133,50 @@ def check_worker(directory, worker, database):
             'Unexpected asset or D1 binding.')
 
 
+def check_isolated_worker(directory, worker, database):
+    require(re.fullmatch(r'[a-z0-9][a-z0-9-]*-ci', worker) and database == FIXTURE_DATABASE,
+            'Missing approved isolated Worker or D1 fixture.')
+    config = json.loads((directory / 'wrangler.json').read_text(encoding='utf-8'))
+    values = config['vars']
+    require(set(values) == {'OWNER_EMAIL', 'APP_ORIGIN', 'GOOGLE_CLIENT_ID'} and
+            values['OWNER_EMAIL'] == 'owner@example.test' and
+            re.fullmatch(r'https://[a-z0-9-]+\.example\.test', values['APP_ORIGIN']) and
+            values['GOOGLE_CLIENT_ID'] == 'example-inactive-client',
+            'Unexpected isolated login fixtures.')
+    require(re.fullmatch(r'\d{4}-\d{2}-\d{2}', config['compatibility_date']), 'Invalid compatibility date.')
+    require(config == {
+        'name': worker, 'main': 'worker.js', 'compatibility_date': config['compatibility_date'],
+        'assets': {'directory': './public', 'binding': 'ASSETS', 'run_worker_first': True},
+        'workers_dev': False, 'preview_urls': False, 'vars': values,
+        'd1_databases': [{'binding': 'DB', 'database_name': worker, 'database_id': database,
+                          'migrations_dir': 'migrations'}]
+    } and config['assets']['run_worker_first'] is True and config['workers_dev'] is False and config['preview_urls'] is False,
+        'Unexpected isolated Worker target or bindings.')
+    manifest = json.loads((directory / 'public' / 'manifest.webmanifest').read_text(encoding='utf-8'))
+    require([manifest.get(key) for key in ('id', 'start_url', 'scope')] == ['/', '/', '/'],
+            'Unexpected installation identity.')
+
+
 def run():
+    profile = os.environ.get('HANDOFF_PROFILE', 'production')
+    require(profile in ('production', 'isolated'), 'Unknown Worker handoff profile.')
+    isolated = profile == 'isolated'
+    require(not isolated or os.environ.get('PUBLISH') != 'true', 'Isolated handoff cannot deploy.')
     token = os.environ['HANDOFF_ACTIONS_READ']
     require(bool(token), 'Private artifact read access has not been configured.')
     repository = os.environ['SOURCE_REPOSITORY']
+    branch = os.environ['SOURCE_WORKFLOW_BRANCH'] if isolated else 'main'
     artifact = select_artifact(lambda path: github(path, token), repository,
-                               os.environ['SOURCE_WORKFLOW_SHA'], os.environ['SOURCE_RUN_ID'])
-    data = github(f'/repos/{repository}/actions/artifacts/{artifact["id"]}/zip', token, download=True)
+                               os.environ['SOURCE_WORKFLOW_SHA'], os.environ['SOURCE_RUN_ID'], branch)
+    data = github(f'/repos/{repository}/actions/artifacts/{artifact["id"]}/zip', token, download=True,
+                  limit=MAX_ISOLATED_ARCHIVE if isolated else MAX_ARCHIVE)
     with tempfile.TemporaryDirectory(prefix='verified-worker-') as workspace:
         directory = Path(workspace)
-        unpack_verified(data, artifact['digest'], directory)
+        unpack_verified(data, artifact['digest'], directory, isolated)
+        if isolated:
+            check_isolated_worker(directory, os.environ['WORKER_NAME'], os.environ['WORKER_DATABASE_ID'])
+            print('Verified the isolated private artifact and its synthetic settings.')
+            return
         check_worker(directory, os.environ['WORKER_NAME'], os.environ['WORKER_DATABASE_ID'])
         print('Verified the approved private artifact and its deployment settings.')
         if os.environ.get('PUBLISH') != 'true':

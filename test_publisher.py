@@ -32,6 +32,24 @@ def digest(data):
     return 'sha256:' + hashlib.sha256(data).hexdigest()
 
 
+def isolated_package(**extra):
+    config = {'name': 'example-ci', 'main': 'worker.js', 'compatibility_date': '2026-01-01',
+              'assets': {'directory': './public', 'binding': 'ASSETS', 'run_worker_first': True},
+              'workers_dev': False, 'preview_urls': False,
+              'vars': {'OWNER_EMAIL': 'owner@example.test', 'APP_ORIGIN': 'https://worker.example.test',
+                       'GOOGLE_CLIENT_ID': 'example-inactive-client'},
+              'd1_databases': [{'binding': 'DB', 'database_name': 'example-ci',
+                                'database_id': publisher.FIXTURE_DATABASE, 'migrations_dir': 'migrations'}]}
+    config.update(extra)
+    stream = io.BytesIO()
+    with ZipFile(stream, 'w') as archive:
+        for name in ['worker.js', 'worker.mjs.map', 'public/index.html', 'public/app.mjs', 'public/sw.js']:
+            archive.writestr(name, '// fixture')
+        archive.writestr('public/manifest.webmanifest', json.dumps({'id': '/', 'start_url': '/', 'scope': '/'}))
+        archive.writestr('wrangler.json', json.dumps(config))
+    return stream.getvalue()
+
+
 class PublisherTests(TestCase):
     def setUp(self):
         self.workspace = TemporaryDirectory()
@@ -92,7 +110,7 @@ class PublisherTests(TestCase):
                'WORKER_DATABASE_ID': DATABASE, 'PATH': 'fixture', 'WRANGLER_BIN': '/test/wrangler.js',
                'CLOUDFLARE_ACCOUNT_ID': 'account-fixture', 'CLOUDFLARE_API_TOKEN': 'upload-fixture'}
 
-        def fetch(path, token, download=False):
+        def fetch(path, token, download=False, limit=publisher.MAX_ARCHIVE):
             self.assertEqual(token, 'source-fixture')
             return data if download else self.read(path)
 
@@ -115,3 +133,39 @@ class PublisherTests(TestCase):
             with self.assertRaises(publisher.Rejected):
                 publisher.run()
             uploader.assert_called_once()
+
+    def test_isolated_worker_uses_its_own_branch_archive_limit_and_settings(self):
+        data = isolated_package()
+        self.run['head_branch'] = 'example-isolation'
+        self.artifacts['artifacts'][0]['digest'] = digest(data)
+        env = {'HANDOFF_PROFILE': 'isolated', 'HANDOFF_ACTIONS_READ': 'source-fixture',
+               'SOURCE_REPOSITORY': 'example/private', 'SOURCE_WORKFLOW_SHA': SHA,
+               'SOURCE_WORKFLOW_BRANCH': 'example-isolation', 'SOURCE_RUN_ID': '5',
+               'WORKER_NAME': 'example-ci', 'WORKER_DATABASE_ID': publisher.FIXTURE_DATABASE}
+
+        def fetch(path, token, download=False, limit=publisher.MAX_ARCHIVE):
+            if download:
+                self.assertEqual(limit, 32 * 1024 * 1024)
+                return data
+            return self.read(path)
+
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(publisher, 'github', side_effect=fetch), \
+                mock.patch.object(publisher.subprocess, 'run') as uploader:
+            publisher.run()
+            os.environ['PUBLISH'] = 'true'
+            with self.assertRaisesRegex(publisher.Rejected, 'cannot deploy'):
+                publisher.run()
+            os.environ['PUBLISH'] = 'false'
+            os.environ['SOURCE_WORKFLOW_BRANCH'] = 'main'
+            with self.assertRaisesRegex(publisher.Rejected, 'unapproved'):
+                publisher.run()
+            uploader.assert_not_called()
+
+    def test_isolated_worker_rejects_production_configuration_and_oversize_archives(self):
+        data = isolated_package(workers_dev=True)
+        publisher.unpack_verified(data, digest(data), self.directory, isolated=True)
+        with self.assertRaisesRegex(publisher.Rejected, 'Unexpected isolated Worker'):
+            publisher.check_isolated_worker(self.directory, 'example-ci', publisher.FIXTURE_DATABASE)
+        with mock.patch.object(publisher, 'MAX_ISOLATED_ARCHIVE', len(data) - 1):
+            with self.assertRaisesRegex(publisher.Rejected, 'archive is too large'):
+                publisher.unpack_verified(data, digest(data), self.directory, isolated=True)
