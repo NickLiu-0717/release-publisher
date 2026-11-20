@@ -21,7 +21,7 @@ concurrency:
 jobs:
   publish:
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: production
     env:
@@ -30,15 +30,16 @@ jobs:
       SOURCE_WORKFLOW_SHA: ${{ secrets.SOURCE_WORKFLOW_SHA }}
       WORKER_NAME: ${{ secrets.WORKER_NAME }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805da76410c181273ba90b1
-        with:
-          persist-credentials: false
+      - name: Check out the exact protected workflow revision
+        run: |
+          git init --quiet
+          git fetch --quiet --depth=1 --no-tags "https://github.com/${GITHUB_REPOSITORY}.git" "$GITHUB_SHA"
+          git checkout --quiet --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - if: inputs.publish
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: '24'
-      - if: inputs.publish
-        run: npm install --prefix "$RUNNER_TEMP/wrangler" --ignore-scripts --no-audit --no-fund wrangler@4.156.0
+        run: |
+          node -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)'
+          npm install --prefix "$RUNNER_TEMP/wrangler" --ignore-scripts --no-audit --no-fund wrangler@4.156.0
       - name: Verify privately built artifact
         if: ${{ !inputs.publish }}
         env:
