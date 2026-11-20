@@ -1,0 +1,58 @@
+name: Verify or publish approved artifact
+on:
+  workflow_dispatch:
+    inputs:
+      source_run:
+        description: Number of a successful private handoff run
+        required: true
+        type: string
+      publish:
+        description: Deploy this verified artifact to Cloudflare
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protected-worker-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    env:
+      SOURCE_RUN_ID: ${{ inputs.source_run }}
+      SOURCE_REPOSITORY: ${{ vars.SOURCE_REPOSITORY }}
+      SOURCE_WORKFLOW_SHA: ${{ vars.SOURCE_WORKFLOW_SHA }}
+      WORKER_NAME: ${{ vars.WORKER_NAME }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - if: inputs.publish
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+      - if: inputs.publish
+        run: npm install --prefix "$RUNNER_TEMP/wrangler" --ignore-scripts --no-audit --no-fund wrangler@4.156.0
+      - name: Verify privately built artifact
+        if: '!inputs.publish'
+        env:
+          HANDOFF_ACTIONS_READ: ${{ secrets.HANDOFF_ACTIONS_READ }}
+          WORKER_DATABASE_ID: ${{ secrets.WORKER_DATABASE_ID }}
+        run: python3 publisher.py
+      - name: Deploy privately built artifact
+        if: inputs.publish
+        env:
+          PUBLISH: 'true'
+          HANDOFF_ACTIONS_READ: ${{ secrets.HANDOFF_ACTIONS_READ }}
+          WORKER_DATABASE_ID: ${{ secrets.WORKER_DATABASE_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          export WRANGLER_BIN="$RUNNER_TEMP/wrangler/node_modules/wrangler/bin/wrangler.js"
+          python3 publisher.py
