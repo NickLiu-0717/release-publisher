@@ -84,7 +84,7 @@ def select_artifact(read, repository, trusted_sha, run_id, branch='main'):
     return artifact
 
 
-def unpack_verified(data, expected_digest, directory, extended=False):
+def unpack_verified(data, expected_digest, directory, extended=False, asset_dir='public'):
     limit = MAX_ISOLATED_ARCHIVE if extended else MAX_ARCHIVE
     require(len(data) <= limit, 'Artifact archive is too large.')
     digest = 'sha256:' + hashlib.sha256(data).hexdigest()
@@ -100,11 +100,11 @@ def unpack_verified(data, expected_digest, directory, extended=False):
             name = entry.filename.rstrip('/')
             parts = name.split('/')
             allowed = name in worker_files or (
-                parts[0] == 'public' and all(re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', part) for part in parts))
+                parts[0] == asset_dir and all(re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', part) for part in parts))
             kind = stat.S_IFMT(entry.external_attr >> 16)
             require(allowed and kind in (0, stat.S_IFDIR if entry.is_dir() else stat.S_IFREG), 'Unexpected artifact entry.')
             if entry.is_dir():
-                require(parts[0] == 'public', 'Unexpected artifact directory.')
+                require(parts[0] == asset_dir, 'Unexpected artifact directory.')
                 continue
             require(name not in files, 'Duplicate artifact name.')
             files.add(name)
@@ -112,9 +112,9 @@ def unpack_verified(data, expected_digest, directory, extended=False):
             destination.parent.mkdir(parents=True, exist_ok=True)
             with destination.open('xb') as output:
                 output.write(archive.read(entry))
-        required = {'worker.js', 'wrangler.json', 'public/index.html'}
+        required = {'worker.js', 'wrangler.json', f'{asset_dir}/index.html'}
         if extended:
-            required.update({'public/app.mjs', 'public/sw.js', 'public/manifest.webmanifest'})
+            required.update(f'{asset_dir}/{name}' for name in ('app.mjs', 'sw.js', 'manifest.webmanifest'))
         else:
             required.add('public/boot.js')
         require(required <= files, 'Required worker files are absent.')
@@ -182,18 +182,37 @@ def check_bound_worker(directory, worker, database, service=None, entrypoint=Non
     check_installation(directory)
 
 
-def check_installation(directory):
-    manifest = json.loads((directory / 'public' / 'manifest.webmanifest').read_text(encoding='utf-8'))
+def check_spa_worker(directory, worker, database, database_name):
+    require(re.fullmatch(r'[a-z0-9][a-z0-9-]*', worker) and not worker.endswith('-ci') and
+            re.fullmatch(r'[a-z0-9][a-z0-9-]*', database_name) and database != FIXTURE_DATABASE and
+            re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', database),
+            'Missing approved Workers target or D1 binding.')
+    config = json.loads((directory / 'wrangler.json').read_text(encoding='utf-8'))
+    date = config.get('compatibility_date', '')
+    require(re.fullmatch(r'\d{4}-\d{2}-\d{2}', date) and config == {
+        'name': worker, 'main': 'worker.js', 'compatibility_date': date,
+        'compatibility_flags': ['nodejs_compat'], 'workers_dev': True, 'preview_urls': False,
+        'keep_vars': True,
+        'assets': {'directory': './dist', 'binding': 'ASSETS', 'run_worker_first': ['/api/*', '/auth/*'],
+                   'html_handling': 'none', 'not_found_handling': 'single-page-application'},
+        'triggers': {'crons': ['*/15 * * * *']},
+        'd1_databases': [{'binding': 'DB', 'database_name': database_name, 'database_id': database}]
+    }, 'Unexpected Workers target, assets, or D1 binding.')
+    check_installation(directory, 'dist')
+
+
+def check_installation(directory, asset_dir='public'):
+    manifest = json.loads((directory / asset_dir / 'manifest.webmanifest').read_text(encoding='utf-8'))
     require([manifest.get(key) for key in ('id', 'start_url', 'scope')] == ['/', '/', '/'],
             'Unexpected installation identity.')
 
 
 def run():
     profile = os.environ.get('HANDOFF_PROFILE', 'production')
-    require(profile in ('production', 'isolated', 'bound-worker', 'routed-worker', 'routed-worker-production'), 'Unknown Worker handoff profile.')
+    require(profile in ('production', 'isolated', 'bound-worker', 'routed-worker', 'routed-worker-production', 'spa-worker'), 'Unknown Worker handoff profile.')
     isolated = profile == 'isolated'
     extended = profile != 'production'
-    require(profile not in ('isolated', 'routed-worker') or os.environ.get('PUBLISH') != 'true',
+    require(profile not in ('isolated', 'routed-worker', 'spa-worker') or os.environ.get('PUBLISH') != 'true',
             'Validation-only handoff cannot deploy.')
     token = os.environ['HANDOFF_ACTIONS_READ']
     require(bool(token), 'Private artifact read access has not been configured.')
@@ -210,7 +229,7 @@ def run():
                   limit=MAX_ISOLATED_ARCHIVE if extended else MAX_ARCHIVE)
     with tempfile.TemporaryDirectory(prefix='verified-worker-') as workspace:
         directory = Path(workspace)
-        unpack_verified(data, artifact['digest'], directory, extended)
+        unpack_verified(data, artifact['digest'], directory, extended, 'dist' if profile == 'spa-worker' else 'public')
         if isolated:
             check_isolated_worker(directory, os.environ['WORKER_NAME'], os.environ['WORKER_DATABASE_ID'])
             print('Verified the isolated private artifact and its synthetic settings.')
@@ -218,6 +237,8 @@ def run():
         settings = (directory, os.environ['WORKER_NAME'], os.environ['WORKER_DATABASE_ID'])
         if profile in ('routed-worker', 'routed-worker-production'):
             check_bound_worker(*settings, os.environ['WORKER_SERVICE'], os.environ['WORKER_ENTRYPOINT'])
+        elif profile == 'spa-worker':
+            check_spa_worker(*settings, os.environ['WORKER_DATABASE_NAME'])
         elif extended:
             check_bound_worker(*settings)
         else:

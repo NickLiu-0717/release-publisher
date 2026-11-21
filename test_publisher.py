@@ -79,6 +79,35 @@ class PublisherTests(TestCase):
         with self.assertRaisesRegex(publisher.Rejected, 'missing or expired'):
             publisher.select_artifact(self.read, 'example/private', SHA, '5')
 
+    def test_spa_worker_requires_exact_target_bindings_and_routing(self):
+        config = {
+            'name': 'example', 'main': 'worker.js', 'compatibility_date': '2026-01-01',
+            'compatibility_flags': ['nodejs_compat'], 'workers_dev': True,
+            'preview_urls': False, 'keep_vars': True,
+            'assets': {'directory': './dist', 'binding': 'ASSETS',
+                       'run_worker_first': ['/api/*', '/auth/*'],
+                       'html_handling': 'none', 'not_found_handling': 'single-page-application'},
+            'triggers': {'crons': ['*/15 * * * *']},
+            'd1_databases': [{'binding': 'DB', 'database_name': 'example-data', 'database_id': DATABASE}]
+        }
+        stream = io.BytesIO()
+        with ZipFile(stream, 'w') as archive:
+            for path in ('worker.js', 'dist/index.html', 'dist/app.mjs', 'dist/sw.js'):
+                archive.writestr(path, '// fixture')
+            archive.writestr('dist/manifest.webmanifest', json.dumps({'id': '/', 'start_url': '/', 'scope': '/'}))
+            archive.writestr('wrangler.json', json.dumps(config))
+        data = stream.getvalue()
+        publisher.unpack_verified(data, digest(data), self.directory, extended=True, asset_dir='dist')
+        publisher.check_spa_worker(self.directory, 'example', DATABASE, 'example-data')
+        with self.assertRaisesRegex(publisher.Rejected, 'Unexpected Workers'):
+            publisher.check_spa_worker(self.directory, 'other', DATABASE, 'example-data')
+        with self.assertRaisesRegex(publisher.Rejected, 'Missing approved'):
+            publisher.check_spa_worker(self.directory, 'example', publisher.FIXTURE_DATABASE, 'example-data')
+        config['assets']['run_worker_first'] = ['/api/*']
+        (self.directory / 'wrangler.json').write_text(json.dumps(config), encoding='utf-8')
+        with self.assertRaisesRegex(publisher.Rejected, 'Unexpected Workers'):
+            publisher.check_spa_worker(self.directory, 'example', DATABASE, 'example-data')
+
     def test_rejects_wrong_controller_commit_and_skipped_validation(self):
         with self.assertRaisesRegex(publisher.Rejected, 'unapproved'):
             publisher.select_artifact(self.read, 'example/private', 'b' * 40, '5')
