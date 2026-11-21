@@ -27,6 +27,10 @@ on:
         description: Use the SPA Worker verification or protected publication profile
         type: boolean
         default: false
+      ledger_worker:
+        description: Use the protected Ledger Worker profile
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -37,12 +41,12 @@ concurrency:
 
 jobs:
   publish:
-    if: github.ref == 'refs/heads/main' && !inputs.isolated && ((!inputs.spa_worker && (!inputs.routed_worker || (inputs.publish && !inputs.bound_worker))) || (inputs.spa_worker && inputs.publish && !inputs.routed_worker && !inputs.bound_worker))
+    if: github.ref == 'refs/heads/main' && !inputs.isolated && ((inputs.ledger_worker && !inputs.spa_worker && !inputs.routed_worker && !inputs.bound_worker) || (!inputs.ledger_worker && ((!inputs.spa_worker && (!inputs.routed_worker || (inputs.publish && !inputs.bound_worker))) || (inputs.spa_worker && inputs.publish && !inputs.routed_worker && !inputs.bound_worker))))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    environment: ${{ inputs.spa_worker && 'spa-worker-production' || inputs.routed_worker && 'routed-worker-production' || inputs.bound_worker && 'bound-worker-production' || 'production' }}
+    environment: ${{ inputs.ledger_worker && 'ledger-worker-production' || inputs.spa_worker && 'spa-worker-production' || inputs.routed_worker && 'routed-worker-production' || inputs.bound_worker && 'bound-worker-production' || 'production' }}
     env:
-      HANDOFF_PROFILE: ${{ inputs.spa_worker && 'spa-worker-production' || inputs.routed_worker && 'routed-worker-production' || inputs.bound_worker && 'bound-worker' || 'production' }}
+      HANDOFF_PROFILE: ${{ inputs.ledger_worker && 'ledger-worker-production' || inputs.spa_worker && 'spa-worker-production' || inputs.routed_worker && 'routed-worker-production' || inputs.bound_worker && 'bound-worker' || 'production' }}
       SOURCE_RUN_ID: ${{ inputs.source_run }}
       SOURCE_REPOSITORY: ${{ secrets.SOURCE_REPOSITORY }}
       SOURCE_WORKFLOW_BRANCH: ${{ secrets.SOURCE_WORKFLOW_BRANCH }}
@@ -89,7 +93,7 @@ jobs:
           WORKER_DATABASE_NAME: ${{ inputs.spa_worker && secrets.WORKER_DATABASE_NAME }}
           WORKER_SERVICE: ${{ inputs.routed_worker && secrets.WORKER_SERVICE }}
           WORKER_ENTRYPOINT: ${{ inputs.routed_worker && secrets.WORKER_ENTRYPOINT }}
-          APPROVED_ARTIFACT_DIGEST: ${{ (inputs.routed_worker || inputs.spa_worker) && secrets.APPROVED_ARTIFACT_DIGEST }}
+          APPROVED_ARTIFACT_DIGEST: ${{ (inputs.routed_worker || inputs.spa_worker || inputs.ledger_worker) && secrets.APPROVED_ARTIFACT_DIGEST }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
@@ -97,7 +101,7 @@ jobs:
           python3 publisher.py
 
   isolated:
-    if: github.ref == 'refs/heads/main' && !inputs.publish && !inputs.bound_worker && ((!inputs.spa_worker && inputs.isolated != inputs.routed_worker) || (inputs.spa_worker && !inputs.isolated && !inputs.routed_worker))
+    if: github.ref == 'refs/heads/main' && !inputs.publish && !inputs.bound_worker && !inputs.ledger_worker && ((!inputs.spa_worker && inputs.isolated != inputs.routed_worker) || (inputs.spa_worker && !inputs.isolated && !inputs.routed_worker))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     environment: handoff-validation
