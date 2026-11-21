@@ -32,7 +32,7 @@ def digest(data):
     return 'sha256:' + hashlib.sha256(data).hexdigest()
 
 
-def isolated_package(**extra):
+def isolated_package(*, include_vars=True, **extra):
     config = {'name': 'example-ci', 'main': 'worker.js', 'compatibility_date': '2026-01-01',
               'assets': {'directory': './public', 'binding': 'ASSETS', 'run_worker_first': True},
               'workers_dev': False, 'preview_urls': False,
@@ -40,6 +40,8 @@ def isolated_package(**extra):
                        'GOOGLE_CLIENT_ID': 'example-inactive-client'},
               'd1_databases': [{'binding': 'DB', 'database_name': 'example-ci',
                                 'database_id': publisher.FIXTURE_DATABASE, 'migrations_dir': 'migrations'}]}
+    if not include_vars:
+        config.pop('vars')
     config.update(extra)
     stream = io.BytesIO()
     with ZipFile(stream, 'w') as archive:
@@ -222,7 +224,7 @@ class PublisherTests(TestCase):
                               'migrations_dir': 'migrations'}],
             'services': [{'binding': 'LEDGER', 'service': 'linked-worker', 'entrypoint': 'LinkedBridge'}]
         }
-        data = isolated_package(**config)
+        data = isolated_package(include_vars=False, **config)
         publisher.unpack_verified(data, digest(data), self.directory, extended=True)
         publisher.check_bound_worker(self.directory, 'example', DATABASE, 'linked-worker', 'LinkedBridge')
         with self.assertRaisesRegex(publisher.Rejected, 'target or bindings'):
