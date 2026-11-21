@@ -19,6 +19,11 @@ on:
         type: boolean
         default: false
 
+      routed_worker:
+        description: Verify a Worker with route and service bindings without deploying
+        type: boolean
+        default: false
+
 permissions:
   contents: read
 
@@ -28,7 +33,7 @@ concurrency:
 
 jobs:
   publish:
-    if: github.ref == 'refs/heads/main' && !inputs.isolated
+    if: github.ref == 'refs/heads/main' && !inputs.isolated && !inputs.routed_worker
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: ${{ inputs.bound_worker && 'bound-worker-production' || 'production' }}
@@ -84,7 +89,7 @@ jobs:
           python3 publisher.py
 
   isolated:
-    if: github.ref == 'refs/heads/main' && inputs.isolated && !inputs.publish && !inputs.bound_worker
+    if: github.ref == 'refs/heads/main' && (inputs.isolated != inputs.routed_worker) && !inputs.publish && !inputs.bound_worker
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     environment: handoff-validation
@@ -111,14 +116,16 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ secrets.HANDOFF_APP_REPOSITORY }}
           permission-actions: read
-      - name: Verify the isolated private artifact
+      - name: Verify the private artifact without deployment
         env:
-          HANDOFF_PROFILE: isolated
+          HANDOFF_PROFILE: ${{ inputs.routed_worker && 'routed-worker' || 'isolated' }}
           SOURCE_RUN_ID: ${{ inputs.source_run }}
           SOURCE_REPOSITORY: ${{ secrets.SOURCE_REPOSITORY }}
-          SOURCE_WORKFLOW_BRANCH: ${{ secrets.SOURCE_WORKFLOW_BRANCH }}
-          SOURCE_WORKFLOW_SHA: ${{ secrets.SOURCE_WORKFLOW_SHA }}
+          SOURCE_WORKFLOW_BRANCH: ${{ inputs.routed_worker && secrets.ROUTED_WORKFLOW_BRANCH || secrets.SOURCE_WORKFLOW_BRANCH }}
+          SOURCE_WORKFLOW_SHA: ${{ inputs.routed_worker && secrets.ROUTED_WORKFLOW_SHA || secrets.SOURCE_WORKFLOW_SHA }}
           HANDOFF_ACTIONS_READ: ${{ steps.handoff-token.outputs.token }}
-          WORKER_NAME: ${{ secrets.WORKER_NAME }}
-          WORKER_DATABASE_ID: ${{ secrets.WORKER_DATABASE_ID }}
+          WORKER_NAME: ${{ inputs.routed_worker && secrets.ROUTED_WORKER_NAME || secrets.WORKER_NAME }}
+          WORKER_DATABASE_ID: ${{ inputs.routed_worker && secrets.ROUTED_DATABASE_ID || secrets.WORKER_DATABASE_ID }}
+          WORKER_SERVICE: ${{ inputs.routed_worker && secrets.ROUTED_SERVICE }}
+          WORKER_ENTRYPOINT: ${{ inputs.routed_worker && secrets.ROUTED_ENTRYPOINT }}
         run: python3 publisher.py

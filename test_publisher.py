@@ -32,7 +32,7 @@ def digest(data):
     return 'sha256:' + hashlib.sha256(data).hexdigest()
 
 
-def isolated_package(**extra):
+def isolated_package(*, include_vars=True, **extra):
     config = {'name': 'example-ci', 'main': 'worker.js', 'compatibility_date': '2026-01-01',
               'assets': {'directory': './public', 'binding': 'ASSETS', 'run_worker_first': True},
               'workers_dev': False, 'preview_urls': False,
@@ -40,6 +40,8 @@ def isolated_package(**extra):
                        'GOOGLE_CLIENT_ID': 'example-inactive-client'},
               'd1_databases': [{'binding': 'DB', 'database_name': 'example-ci',
                                 'database_id': publisher.FIXTURE_DATABASE, 'migrations_dir': 'migrations'}]}
+    if not include_vars:
+        config.pop('vars')
     config.update(extra)
     stream = io.BytesIO()
     with ZipFile(stream, 'w') as archive:
@@ -210,3 +212,25 @@ class PublisherTests(TestCase):
             with self.assertRaisesRegex(publisher.Rejected, 'Unexpected production Worker'):
                 publisher.run()
             uploader.assert_called_once()
+
+    def test_routed_worker_preserves_routes_and_rejects_a_different_service(self):
+        config = {
+            'name': 'example', 'main': 'worker.js', 'compatibility_date': '2026-01-01',
+            'assets': {'directory': './public', 'binding': 'ASSETS',
+                       'run_worker_first': ['/', '/api/*', '/auth/*'],
+                       'html_handling': 'none', 'not_found_handling': 'none'},
+            'workers_dev': True, 'preview_urls': False, 'keep_vars': True,
+            'd1_databases': [{'binding': 'DB', 'database_name': 'example', 'database_id': DATABASE,
+                              'migrations_dir': 'migrations'}],
+            'services': [{'binding': 'LEDGER', 'service': 'linked-worker', 'entrypoint': 'LinkedBridge'}]
+        }
+        data = isolated_package(include_vars=False, **config)
+        publisher.unpack_verified(data, digest(data), self.directory, extended=True)
+        publisher.check_bound_worker(self.directory, 'example', DATABASE, 'linked-worker', 'LinkedBridge')
+        with self.assertRaisesRegex(publisher.Rejected, 'target or bindings'):
+            publisher.check_bound_worker(self.directory, 'example', DATABASE, 'other-worker', 'LinkedBridge')
+
+    def test_routed_validation_rejects_publish_before_accessing_credentials(self):
+        with mock.patch.dict(os.environ, {'HANDOFF_PROFILE': 'routed-worker', 'PUBLISH': 'true'}, clear=True):
+            with self.assertRaisesRegex(publisher.Rejected, 'Validation-only handoff cannot deploy'):
+                publisher.run()
