@@ -234,3 +234,17 @@ class PublisherTests(TestCase):
         with mock.patch.dict(os.environ, {'HANDOFF_PROFILE': 'routed-worker', 'PUBLISH': 'true'}, clear=True):
             with self.assertRaisesRegex(publisher.Rejected, 'Validation-only handoff cannot deploy'):
                 publisher.run()
+
+    def test_routed_production_pins_the_independently_verified_archive(self):
+        env = {
+            'HANDOFF_PROFILE': 'routed-worker-production', 'PUBLISH': 'true',
+            'HANDOFF_ACTIONS_READ': 'source-fixture', 'SOURCE_REPOSITORY': 'example/private',
+            'SOURCE_WORKFLOW_SHA': SHA, 'SOURCE_WORKFLOW_BRANCH': 'main', 'SOURCE_RUN_ID': '5',
+            'APPROVED_ARTIFACT_DIGEST': 'sha256:' + '0' * 64,
+        }
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(publisher, 'github', side_effect=lambda path, token: self.read(path)), \
+                mock.patch.object(publisher.subprocess, 'run') as uploader:
+            with self.assertRaisesRegex(publisher.Rejected, 'separately approved digest'):
+                publisher.run()
+            uploader.assert_not_called()
