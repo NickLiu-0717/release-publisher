@@ -46,6 +46,21 @@ jobs:
           git fetch --quiet --depth=1 --no-tags "https://github.com/${GITHUB_REPOSITORY}.git" "$GITHUB_SHA"
           git checkout --quiet --detach FETCH_HEAD
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Confirm the handoff token repository scope
+        env:
+          CONTROLLER_REPOSITORY: ${{ secrets.HANDOFF_APP_REPOSITORY }}
+        run: |
+          [[ "$CONTROLLER_REPOSITORY" =~ ^[A-Za-z0-9_.-]+$ ]]
+          test "$SOURCE_REPOSITORY" = "$GITHUB_REPOSITORY_OWNER/$CONTROLLER_REPOSITORY"
+      - name: Mint a read-only handoff installation token
+        id: handoff-token
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc
+        with:
+          client-id: ${{ vars.HANDOFF_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HANDOFF_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ secrets.HANDOFF_APP_REPOSITORY }}
+          permission-actions: read
       - if: inputs.publish
         run: |
           node -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)'
@@ -53,14 +68,14 @@ jobs:
       - name: Verify privately built artifact
         if: ${{ !inputs.publish }}
         env:
-          HANDOFF_ACTIONS_READ: ${{ secrets.HANDOFF_ACTIONS_READ }}
+          HANDOFF_ACTIONS_READ: ${{ steps.handoff-token.outputs.token }}
           WORKER_DATABASE_ID: ${{ secrets.WORKER_DATABASE_ID }}
         run: python3 publisher.py
       - name: Deploy privately built artifact
         if: inputs.publish
         env:
           PUBLISH: 'true'
-          HANDOFF_ACTIONS_READ: ${{ secrets.HANDOFF_ACTIONS_READ }}
+          HANDOFF_ACTIONS_READ: ${{ steps.handoff-token.outputs.token }}
           WORKER_DATABASE_ID: ${{ secrets.WORKER_DATABASE_ID }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -80,6 +95,22 @@ jobs:
           git fetch --quiet --depth=1 --no-tags "https://github.com/${GITHUB_REPOSITORY}.git" "$GITHUB_SHA"
           git checkout --quiet --detach FETCH_HEAD
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Confirm the handoff token repository scope
+        env:
+          SOURCE_REPOSITORY: ${{ secrets.SOURCE_REPOSITORY }}
+          CONTROLLER_REPOSITORY: ${{ secrets.HANDOFF_APP_REPOSITORY }}
+        run: |
+          [[ "$CONTROLLER_REPOSITORY" =~ ^[A-Za-z0-9_.-]+$ ]]
+          test "$SOURCE_REPOSITORY" = "$GITHUB_REPOSITORY_OWNER/$CONTROLLER_REPOSITORY"
+      - name: Mint a read-only handoff installation token
+        id: handoff-token
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc
+        with:
+          client-id: ${{ vars.HANDOFF_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HANDOFF_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ secrets.HANDOFF_APP_REPOSITORY }}
+          permission-actions: read
       - name: Verify the isolated private artifact
         env:
           HANDOFF_PROFILE: isolated
@@ -87,7 +118,7 @@ jobs:
           SOURCE_REPOSITORY: ${{ secrets.SOURCE_REPOSITORY }}
           SOURCE_WORKFLOW_BRANCH: ${{ secrets.SOURCE_WORKFLOW_BRANCH }}
           SOURCE_WORKFLOW_SHA: ${{ secrets.SOURCE_WORKFLOW_SHA }}
-          HANDOFF_ACTIONS_READ: ${{ secrets.HANDOFF_ACTIONS_READ }}
+          HANDOFF_ACTIONS_READ: ${{ steps.handoff-token.outputs.token }}
           WORKER_NAME: ${{ secrets.WORKER_NAME }}
           WORKER_DATABASE_ID: ${{ secrets.WORKER_DATABASE_ID }}
         run: python3 publisher.py
