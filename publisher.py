@@ -155,20 +155,29 @@ def check_isolated_worker(directory, worker, database):
     check_installation(directory)
 
 
-def check_bound_worker(directory, worker, database):
+def check_bound_worker(directory, worker, database, service=None, entrypoint=None):
     require(re.fullmatch(r'[a-z0-9][a-z0-9-]*', worker) and not worker.endswith('-ci') and
             re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', database) and database != FIXTURE_DATABASE,
             'Missing approved production Worker or D1 binding.')
     config = json.loads((directory / 'wrangler.json').read_text(encoding='utf-8'))
     require(re.fullmatch(r'\d{4}-\d{2}-\d{2}', config['compatibility_date']), 'Invalid compatibility date.')
+    assets = {'directory': './public', 'binding': 'ASSETS', 'run_worker_first': True}
+    extra_bindings = {}
+    if service is not None:
+        require(re.fullmatch(r'[a-z0-9][a-z0-9-]*', service) and
+                re.fullmatch(r'[A-Za-z][A-Za-z0-9_]*', entrypoint or ''),
+                'Missing approved service binding.')
+        assets.update(run_worker_first=['/', '/api/*', '/auth/*'],
+                      html_handling='none', not_found_handling='none')
+        extra_bindings['services'] = [{'binding': 'LEDGER', 'service': service,
+                                       'entrypoint': entrypoint}]
     require(config == {
         'name': worker, 'main': 'worker.js', 'compatibility_date': config['compatibility_date'],
-        'assets': {'directory': './public', 'binding': 'ASSETS', 'run_worker_first': True},
+        'assets': assets, **extra_bindings,
         'workers_dev': True, 'preview_urls': False, 'keep_vars': True,
         'd1_databases': [{'binding': 'DB', 'database_name': worker, 'database_id': database,
                           'migrations_dir': 'migrations'}]
-    } and config['assets']['run_worker_first'] is True and config['workers_dev'] is True and
-        config['preview_urls'] is False and config['keep_vars'] is True,
+    },
         'Unexpected production Worker target or bindings.')
     check_installation(directory)
 
@@ -181,10 +190,11 @@ def check_installation(directory):
 
 def run():
     profile = os.environ.get('HANDOFF_PROFILE', 'production')
-    require(profile in ('production', 'isolated', 'bound-worker'), 'Unknown Worker handoff profile.')
+    require(profile in ('production', 'isolated', 'bound-worker', 'routed-worker'), 'Unknown Worker handoff profile.')
     isolated = profile == 'isolated'
     extended = profile != 'production'
-    require(not isolated or os.environ.get('PUBLISH') != 'true', 'Isolated handoff cannot deploy.')
+    require(profile not in ('isolated', 'routed-worker') or os.environ.get('PUBLISH') != 'true',
+            'Validation-only handoff cannot deploy.')
     token = os.environ['HANDOFF_ACTIONS_READ']
     require(bool(token), 'Private artifact read access has not been configured.')
     repository = os.environ['SOURCE_REPOSITORY']
@@ -200,8 +210,13 @@ def run():
             check_isolated_worker(directory, os.environ['WORKER_NAME'], os.environ['WORKER_DATABASE_ID'])
             print('Verified the isolated private artifact and its synthetic settings.')
             return
-        verify_worker = check_bound_worker if extended else check_worker
-        verify_worker(directory, os.environ['WORKER_NAME'], os.environ['WORKER_DATABASE_ID'])
+        settings = (directory, os.environ['WORKER_NAME'], os.environ['WORKER_DATABASE_ID'])
+        if profile == 'routed-worker':
+            check_bound_worker(*settings, os.environ['WORKER_SERVICE'], os.environ['WORKER_ENTRYPOINT'])
+        elif extended:
+            check_bound_worker(*settings)
+        else:
+            check_worker(*settings)
         print('Verified the approved private artifact and its deployment settings.')
         if os.environ.get('PUBLISH') != 'true':
             return

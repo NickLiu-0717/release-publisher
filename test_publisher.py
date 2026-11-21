@@ -210,3 +210,25 @@ class PublisherTests(TestCase):
             with self.assertRaisesRegex(publisher.Rejected, 'Unexpected production Worker'):
                 publisher.run()
             uploader.assert_called_once()
+
+    def test_routed_worker_preserves_routes_and_rejects_a_different_service(self):
+        config = {
+            'name': 'example', 'main': 'worker.js', 'compatibility_date': '2026-01-01',
+            'assets': {'directory': './public', 'binding': 'ASSETS',
+                       'run_worker_first': ['/', '/api/*', '/auth/*'],
+                       'html_handling': 'none', 'not_found_handling': 'none'},
+            'workers_dev': True, 'preview_urls': False, 'keep_vars': True,
+            'd1_databases': [{'binding': 'DB', 'database_name': 'example', 'database_id': DATABASE,
+                              'migrations_dir': 'migrations'}],
+            'services': [{'binding': 'LEDGER', 'service': 'linked-worker', 'entrypoint': 'LinkedBridge'}]
+        }
+        data = isolated_package(**config)
+        publisher.unpack_verified(data, digest(data), self.directory, extended=True)
+        publisher.check_bound_worker(self.directory, 'example', DATABASE, 'linked-worker', 'LinkedBridge')
+        with self.assertRaisesRegex(publisher.Rejected, 'target or bindings'):
+            publisher.check_bound_worker(self.directory, 'example', DATABASE, 'other-worker', 'LinkedBridge')
+
+    def test_routed_validation_rejects_publish_before_accessing_credentials(self):
+        with mock.patch.dict(os.environ, {'HANDOFF_PROFILE': 'routed-worker', 'PUBLISH': 'true'}, clear=True):
+            with self.assertRaisesRegex(publisher.Rejected, 'Validation-only handoff cannot deploy'):
+                publisher.run()
