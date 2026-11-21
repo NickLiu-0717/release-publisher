@@ -84,7 +84,7 @@ def select_artifact(read, repository, trusted_sha, run_id, branch='main'):
     return artifact
 
 
-def unpack_verified(data, expected_digest, directory, extended=False, asset_dir='public'):
+def unpack_verified(data, expected_digest, directory, extended=False, asset_dir='public', ledger=False):
     limit = MAX_ISOLATED_ARCHIVE if extended else MAX_ARCHIVE
     require(len(data) <= limit, 'Artifact archive is too large.')
     digest = 'sha256:' + hashlib.sha256(data).hexdigest()
@@ -114,7 +114,9 @@ def unpack_verified(data, expected_digest, directory, extended=False, asset_dir=
                 output.write(archive.read(entry))
         required = {'worker.js', 'wrangler.json', f'{asset_dir}/index.html'}
         if extended:
-            required.update(f'{asset_dir}/{name}' for name in ('app.mjs', 'sw.js', 'manifest.webmanifest'))
+            required.update(f'{asset_dir}/{name}' for name in ('sw.js', 'manifest.webmanifest'))
+            if not ledger:
+                required.add(f'{asset_dir}/app.mjs')
         else:
             required.add('public/boot.js')
         require(required <= files, 'Required worker files are absent.')
@@ -201,19 +203,40 @@ def check_spa_worker(directory, worker, database, database_name):
     check_installation(directory, 'dist')
 
 
-def check_installation(directory, asset_dir='public'):
+def check_ledger_worker(directory, worker, database):
+    require(worker == 'ledger' and database != FIXTURE_DATABASE and
+            re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', database),
+            'Missing approved Ledger Worker or D1 binding.')
+    config = json.loads((directory / 'wrangler.json').read_text(encoding='utf-8'))
+    require(config == {
+        'name': worker, 'main': 'worker.js', 'compatibility_date': '2026-11-03',
+        'workers_dev': True, 'preview_urls': False, 'keep_vars': True,
+        'assets': {'directory': './dist', 'binding': 'ASSETS', 'run_worker_first': True,
+                   'not_found_handling': 'single-page-application', 'html_handling': 'none'},
+        'd1_databases': [{'binding': 'AI_USAGE', 'database_name': 'daily-ledger-db', 'database_id': database}],
+        'services': [{'binding': 'SPLIT', 'service': 'together-split', 'entrypoint': 'SplitBridge'}],
+        'triggers': {'crons': ['*/5 * * * *']}
+    } and config['assets']['run_worker_first'] is True and config['workers_dev'] is True and
+            config['preview_urls'] is False and config['keep_vars'] is True, 'Unexpected Ledger deployment settings.')
+    check_installation(directory, 'dist', expected_id=None)
+    require(any((directory / 'dist/assets').glob('index-*.js')) and
+            (directory / 'dist/apple-touch-icon.png').is_file(), 'Required Ledger app assets are absent.')
+
+
+def check_installation(directory, asset_dir='public', expected_id='/'):
     manifest = json.loads((directory / asset_dir / 'manifest.webmanifest').read_text(encoding='utf-8'))
-    require([manifest.get(key) for key in ('id', 'start_url', 'scope')] == ['/', '/', '/'],
+    require([manifest.get(key) for key in ('id', 'start_url', 'scope')] == [expected_id, '/', '/'],
             'Unexpected installation identity.')
 
 
 def run():
     profile = os.environ.get('HANDOFF_PROFILE', 'production')
     require(profile in ('production', 'isolated', 'bound-worker', 'routed-worker', 'routed-worker-production',
-                        'spa-worker', 'spa-worker-production'), 'Unknown Worker handoff profile.')
+                        'spa-worker', 'spa-worker-production', 'ledger-worker-production'), 'Unknown Worker handoff profile.')
     isolated = profile == 'isolated'
     extended = profile != 'production'
     spa = profile in ('spa-worker', 'spa-worker-production')
+    ledger = profile == 'ledger-worker-production'
     require(profile not in ('isolated', 'routed-worker', 'spa-worker') or os.environ.get('PUBLISH') != 'true',
             'Validation-only handoff cannot deploy.')
     token = os.environ['HANDOFF_ACTIONS_READ']
@@ -224,6 +247,7 @@ def run():
                                os.environ['SOURCE_WORKFLOW_SHA'], os.environ['SOURCE_RUN_ID'], branch)
     if profile in ('routed-worker-production', 'spa-worker-production'):
         require(os.environ.get('PUBLISH') == 'true', 'Production profile must be explicitly dispatched to deploy.')
+    if profile in ('routed-worker-production', 'spa-worker-production') or (ledger and os.environ.get('PUBLISH') == 'true'):
         approved_digest = os.environ.get('APPROVED_ARTIFACT_DIGEST', '')
         require(re.fullmatch(r'sha256:[a-f0-9]{64}', approved_digest) and artifact['digest'] == approved_digest,
                 'Artifact does not match the separately approved digest.')
@@ -231,7 +255,7 @@ def run():
                   limit=MAX_ISOLATED_ARCHIVE if extended else MAX_ARCHIVE)
     with tempfile.TemporaryDirectory(prefix='verified-worker-') as workspace:
         directory = Path(workspace)
-        unpack_verified(data, artifact['digest'], directory, extended, 'dist' if spa else 'public')
+        unpack_verified(data, artifact['digest'], directory, extended, 'dist' if spa or ledger else 'public', ledger)
         if isolated:
             check_isolated_worker(directory, os.environ['WORKER_NAME'], os.environ['WORKER_DATABASE_ID'])
             print('Verified the isolated private artifact and its synthetic settings.')
@@ -239,6 +263,8 @@ def run():
         settings = (directory, os.environ['WORKER_NAME'], os.environ['WORKER_DATABASE_ID'])
         if profile in ('routed-worker', 'routed-worker-production'):
             check_bound_worker(*settings, os.environ['WORKER_SERVICE'], os.environ['WORKER_ENTRYPOINT'])
+        elif ledger:
+            check_ledger_worker(*settings)
         elif spa:
             check_spa_worker(*settings, os.environ['WORKER_DATABASE_NAME'])
         elif extended:

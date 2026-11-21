@@ -108,6 +108,37 @@ class PublisherTests(TestCase):
         with self.assertRaisesRegex(publisher.Rejected, 'Unexpected Workers'):
             publisher.check_spa_worker(self.directory, 'example', DATABASE, 'example-data')
 
+    def test_ledger_handoff_rejects_changed_bindings_and_schedule(self):
+        config = {
+            'name': 'ledger', 'main': 'worker.js', 'compatibility_date': '2026-11-03',
+            'workers_dev': True, 'preview_urls': False, 'keep_vars': True,
+            'assets': {'directory': './dist', 'binding': 'ASSETS', 'run_worker_first': True,
+                       'not_found_handling': 'single-page-application', 'html_handling': 'none'},
+            'd1_databases': [{'binding': 'AI_USAGE', 'database_name': 'daily-ledger-db', 'database_id': DATABASE}],
+            'services': [{'binding': 'SPLIT', 'service': 'together-split', 'entrypoint': 'SplitBridge'}],
+            'triggers': {'crons': ['*/5 * * * *']}
+        }
+        stream = io.BytesIO()
+        with ZipFile(stream, 'w') as archive:
+            for path in ('worker.js', 'dist/index.html', 'dist/sw.js', 'dist/assets/index-fixture.js',
+                         'dist/apple-touch-icon.png'):
+                archive.writestr(path, '// fixture')
+            archive.writestr('dist/manifest.webmanifest', json.dumps({'start_url': '/', 'scope': '/'}))
+            archive.writestr('wrangler.json', json.dumps(config))
+        data = stream.getvalue()
+        publisher.unpack_verified(data, digest(data), self.directory, extended=True, asset_dir='dist', ledger=True)
+        publisher.check_ledger_worker(self.directory, 'ledger', DATABASE)
+        with self.assertRaisesRegex(publisher.Rejected, 'Missing approved Ledger'):
+            publisher.check_ledger_worker(self.directory, 'ledger-ci', DATABASE)
+        with self.assertRaisesRegex(publisher.Rejected, 'Unexpected Ledger'):
+            publisher.check_ledger_worker(self.directory, 'ledger', 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff')
+        for changed in ({'services': []}, {'vars': {'OWNER_EMAIL': 'fixture@example.test'}},
+                        {'triggers': {'crons': ['*/15 * * * *']}}):
+            with self.subTest(changed=changed):
+                (self.directory / 'wrangler.json').write_text(json.dumps(config | changed), encoding='utf-8')
+                with self.assertRaisesRegex(publisher.Rejected, 'Unexpected Ledger'):
+                    publisher.check_ledger_worker(self.directory, 'ledger', DATABASE)
+
     def test_rejects_wrong_controller_commit_and_skipped_validation(self):
         with self.assertRaisesRegex(publisher.Rejected, 'unapproved'):
             publisher.select_artifact(self.read, 'example/private', 'b' * 40, '5')
