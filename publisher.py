@@ -190,7 +190,7 @@ def check_installation(directory):
 
 def run():
     profile = os.environ.get('HANDOFF_PROFILE', 'production')
-    require(profile in ('production', 'isolated', 'bound-worker', 'routed-worker'), 'Unknown Worker handoff profile.')
+    require(profile in ('production', 'isolated', 'bound-worker', 'routed-worker', 'routed-worker-production'), 'Unknown Worker handoff profile.')
     isolated = profile == 'isolated'
     extended = profile != 'production'
     require(profile not in ('isolated', 'routed-worker') or os.environ.get('PUBLISH') != 'true',
@@ -201,6 +201,11 @@ def run():
     branch = os.environ['SOURCE_WORKFLOW_BRANCH'] if extended else 'main'
     artifact = select_artifact(lambda path: github(path, token), repository,
                                os.environ['SOURCE_WORKFLOW_SHA'], os.environ['SOURCE_RUN_ID'], branch)
+    if profile == 'routed-worker-production':
+        require(os.environ.get('PUBLISH') == 'true', 'Routed production profile must be explicitly dispatched to deploy.')
+        approved_digest = os.environ.get('APPROVED_ARTIFACT_DIGEST', '')
+        require(re.fullmatch(r'sha256:[a-f0-9]{64}', approved_digest) and artifact['digest'] == approved_digest,
+                'Artifact does not match the separately approved digest.')
     data = github(f'/repos/{repository}/actions/artifacts/{artifact["id"]}/zip', token, download=True,
                   limit=MAX_ISOLATED_ARCHIVE if extended else MAX_ARCHIVE)
     with tempfile.TemporaryDirectory(prefix='verified-worker-') as workspace:
@@ -211,7 +216,7 @@ def run():
             print('Verified the isolated private artifact and its synthetic settings.')
             return
         settings = (directory, os.environ['WORKER_NAME'], os.environ['WORKER_DATABASE_ID'])
-        if profile == 'routed-worker':
+        if profile in ('routed-worker', 'routed-worker-production'):
             check_bound_worker(*settings, os.environ['WORKER_SERVICE'], os.environ['WORKER_ENTRYPOINT'])
         elif extended:
             check_bound_worker(*settings)
