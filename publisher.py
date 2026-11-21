@@ -209,9 +209,11 @@ def check_installation(directory, asset_dir='public'):
 
 def run():
     profile = os.environ.get('HANDOFF_PROFILE', 'production')
-    require(profile in ('production', 'isolated', 'bound-worker', 'routed-worker', 'routed-worker-production', 'spa-worker'), 'Unknown Worker handoff profile.')
+    require(profile in ('production', 'isolated', 'bound-worker', 'routed-worker', 'routed-worker-production',
+                        'spa-worker', 'spa-worker-production'), 'Unknown Worker handoff profile.')
     isolated = profile == 'isolated'
     extended = profile != 'production'
+    spa = profile in ('spa-worker', 'spa-worker-production')
     require(profile not in ('isolated', 'routed-worker', 'spa-worker') or os.environ.get('PUBLISH') != 'true',
             'Validation-only handoff cannot deploy.')
     token = os.environ['HANDOFF_ACTIONS_READ']
@@ -220,8 +222,8 @@ def run():
     branch = os.environ['SOURCE_WORKFLOW_BRANCH'] if extended else 'main'
     artifact = select_artifact(lambda path: github(path, token), repository,
                                os.environ['SOURCE_WORKFLOW_SHA'], os.environ['SOURCE_RUN_ID'], branch)
-    if profile == 'routed-worker-production':
-        require(os.environ.get('PUBLISH') == 'true', 'Routed production profile must be explicitly dispatched to deploy.')
+    if profile in ('routed-worker-production', 'spa-worker-production'):
+        require(os.environ.get('PUBLISH') == 'true', 'Production profile must be explicitly dispatched to deploy.')
         approved_digest = os.environ.get('APPROVED_ARTIFACT_DIGEST', '')
         require(re.fullmatch(r'sha256:[a-f0-9]{64}', approved_digest) and artifact['digest'] == approved_digest,
                 'Artifact does not match the separately approved digest.')
@@ -229,7 +231,7 @@ def run():
                   limit=MAX_ISOLATED_ARCHIVE if extended else MAX_ARCHIVE)
     with tempfile.TemporaryDirectory(prefix='verified-worker-') as workspace:
         directory = Path(workspace)
-        unpack_verified(data, artifact['digest'], directory, extended, 'dist' if profile == 'spa-worker' else 'public')
+        unpack_verified(data, artifact['digest'], directory, extended, 'dist' if spa else 'public')
         if isolated:
             check_isolated_worker(directory, os.environ['WORKER_NAME'], os.environ['WORKER_DATABASE_ID'])
             print('Verified the isolated private artifact and its synthetic settings.')
@@ -237,7 +239,7 @@ def run():
         settings = (directory, os.environ['WORKER_NAME'], os.environ['WORKER_DATABASE_ID'])
         if profile in ('routed-worker', 'routed-worker-production'):
             check_bound_worker(*settings, os.environ['WORKER_SERVICE'], os.environ['WORKER_ENTRYPOINT'])
-        elif profile == 'spa-worker':
+        elif spa:
             check_spa_worker(*settings, os.environ['WORKER_DATABASE_NAME'])
         elif extended:
             check_bound_worker(*settings)
