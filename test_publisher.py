@@ -53,6 +53,19 @@ def isolated_package(*, include_vars=True, **extra):
 
 
 class PublisherTests(TestCase):
+    def test_ledger_reuses_shared_environments_without_another_workers_token(self):
+        workflow = (Path(__file__).parent / '.github/workflows/publish.yml').read_text(encoding='utf-8')
+        production, validation = workflow.split('\n  isolated:', 1)
+        self.assertIn("(inputs.ledger_worker || inputs.spa_worker) && 'spa-worker-production'", production)
+        self.assertNotIn('environment: ledger-worker-production', workflow)
+        self.assertIn('environment: handoff-validation', validation)
+        self.assertIn("inputs.ledger_worker && inputs.publish", production)
+        self.assertIn('!inputs.publish', validation)
+        self.assertIn('secrets.LEDGER_CLOUDFLARE_API_TOKEN || !inputs.ledger_worker && secrets.CLOUDFLARE_API_TOKEN', production)
+        self.assertNotIn('CLOUDFLARE_API_TOKEN', validation)
+        for job in (production, validation):
+            self.assertIn('private-key: ${{ secrets.HANDOFF_APP_PRIVATE_KEY }}', job)
+
     def setUp(self):
         self.workspace = TemporaryDirectory()
         self.addCleanup(self.workspace.cleanup)
