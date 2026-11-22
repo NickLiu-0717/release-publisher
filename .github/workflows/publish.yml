@@ -13,6 +13,7 @@ on:
           - split
           - fridge
           - ledger
+          - dtr
       source_run:
         description: Number of a successful private handoff run
         required: true
@@ -85,6 +86,7 @@ jobs:
             split) profile=routed-worker-production; environment=routed-worker-production ;;
             fridge) profile=spa-worker-production; environment=spa-worker-production ;;
             ledger) profile=ledger-worker-production; environment=spa-worker-production ;;
+            dtr) profile=dtr-worker-production; environment=bound-worker-production ;;
             *) exit 1 ;;
           esac
           printf 'profile=%s\nenvironment=%s\n' "$profile" "$environment" >> "$GITHUB_OUTPUT"
@@ -99,10 +101,10 @@ jobs:
       HANDOFF_PROFILE: ${{ needs.select.outputs.profile }}
       SOURCE_RUN_ID: ${{ inputs.source_run }}
       SOURCE_REPOSITORY: ${{ secrets.SOURCE_REPOSITORY }}
-      SOURCE_WORKFLOW_BRANCH: ${{ needs.select.outputs.profile == 'ledger-worker-production' && secrets.LEDGER_WORKFLOW_BRANCH || needs.select.outputs.profile != 'ledger-worker-production' && secrets.SOURCE_WORKFLOW_BRANCH }}
-      SOURCE_WORKFLOW_SHA: ${{ needs.select.outputs.profile == 'ledger-worker-production' && secrets.LEDGER_WORKFLOW_SHA || needs.select.outputs.profile != 'ledger-worker-production' && secrets.SOURCE_WORKFLOW_SHA }}
-      WORKER_NAME: ${{ needs.select.outputs.profile == 'ledger-worker-production' && secrets.LEDGER_WORKER_NAME || needs.select.outputs.profile != 'ledger-worker-production' && secrets.WORKER_NAME }}
-      WORKER_DATABASE_ID: ${{ needs.select.outputs.profile == 'ledger-worker-production' && secrets.LEDGER_DATABASE_ID || needs.select.outputs.profile != 'ledger-worker-production' && secrets.WORKER_DATABASE_ID }}
+      SOURCE_WORKFLOW_BRANCH: ${{ needs.select.outputs.profile == 'dtr-worker-production' && secrets.DTR_WORKFLOW_BRANCH || needs.select.outputs.profile != 'dtr-worker-production' && (needs.select.outputs.profile == 'ledger-worker-production' && secrets.LEDGER_WORKFLOW_BRANCH || needs.select.outputs.profile != 'ledger-worker-production' && secrets.SOURCE_WORKFLOW_BRANCH) }}
+      SOURCE_WORKFLOW_SHA: ${{ needs.select.outputs.profile == 'dtr-worker-production' && secrets.DTR_WORKFLOW_SHA || needs.select.outputs.profile != 'dtr-worker-production' && (needs.select.outputs.profile == 'ledger-worker-production' && secrets.LEDGER_WORKFLOW_SHA || needs.select.outputs.profile != 'ledger-worker-production' && secrets.SOURCE_WORKFLOW_SHA) }}
+      WORKER_NAME: ${{ needs.select.outputs.profile == 'dtr-worker-production' && secrets.DTR_WORKER_NAME || needs.select.outputs.profile != 'dtr-worker-production' && (needs.select.outputs.profile == 'ledger-worker-production' && secrets.LEDGER_WORKER_NAME || needs.select.outputs.profile != 'ledger-worker-production' && secrets.WORKER_NAME) }}
+      WORKER_DATABASE_ID: ${{ needs.select.outputs.profile == 'dtr-worker-production' && secrets.DTR_DATABASE_ID || needs.select.outputs.profile != 'dtr-worker-production' && (needs.select.outputs.profile == 'ledger-worker-production' && secrets.LEDGER_DATABASE_ID || needs.select.outputs.profile != 'ledger-worker-production' && secrets.WORKER_DATABASE_ID) }}
       WORKER_DATABASE_NAME: ${{ needs.select.outputs.profile == 'spa-worker-production' && secrets.WORKER_DATABASE_NAME }}
       WORKER_SERVICE: ${{ needs.select.outputs.profile == 'routed-worker-production' && secrets.WORKER_SERVICE }}
       WORKER_ENTRYPOINT: ${{ needs.select.outputs.profile == 'routed-worker-production' && secrets.WORKER_ENTRYPOINT }}
@@ -148,7 +150,7 @@ jobs:
           HANDOFF_ACTIONS_READ: ${{ steps.handoff-token.outputs.token }}
           APPROVED_ARTIFACT: ${{ steps.approval.outputs.artifact }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ needs.select.outputs.profile == 'ledger-worker-production' && secrets.LEDGER_CLOUDFLARE_API_TOKEN || needs.select.outputs.profile != 'ledger-worker-production' && secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ needs.select.outputs.profile == 'dtr-worker-production' && secrets.DTR_CLOUDFLARE_API_TOKEN || needs.select.outputs.profile != 'dtr-worker-production' && (needs.select.outputs.profile == 'ledger-worker-production' && secrets.LEDGER_CLOUDFLARE_API_TOKEN || needs.select.outputs.profile != 'ledger-worker-production' && secrets.CLOUDFLARE_API_TOKEN) }}
         run: |
           export WRANGLER_BIN="$RUNNER_TEMP/wrangler/node_modules/wrangler/bin/wrangler.js"
           python3 publisher.py
