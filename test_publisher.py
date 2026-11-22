@@ -54,6 +54,43 @@ def isolated_package(*, include_vars=True, **extra):
 
 
 class PublisherTests(TestCase):
+    def test_password_package_requires_private_asset_routing_and_install_identity(self):
+        directory = self.directory
+        worker = 'gnliu-password-vault'
+        config = {'name': worker, 'main': 'worker.js', 'compatibility_date': '2026-11-20',
+                  'workers_dev': True, 'preview_urls': False, 'keep_vars': True,
+                  'assets': {'directory': './dist-worker', 'binding': 'ASSETS', 'run_worker_first': True,
+                             'html_handling': 'none', 'not_found_handling': 'none'},
+                  'vars': {'VAULT_HOST': worker + '.gnliu.workers.dev'}}
+        build = 'a' * 16
+        stream = io.BytesIO()
+        with ZipFile(stream, 'w') as archive:
+            archive.writestr('worker.js', 'export default {}')
+            archive.writestr('wrangler.json', json.dumps(config))
+            archive.writestr('dist-worker/index.html', f'<meta name="vault-build" content="{build}">"/icons/vault-180-{build}.png"')
+            archive.writestr('dist-worker/manifest.webmanifest',
+                             json.dumps({'id': '/', 'scope': '/', 'start_url': '/', 'display': 'standalone'}))
+            archive.writestr('dist-worker/sw.js', '')
+            for name in ('app.css', 'app.js', 'passkey.js', 'pwa-mode.js', 'storage.js', 'updates.js', 'vault.js'):
+                archive.writestr(f'dist-worker/_app/{build}/{name}', '')
+            for size in (180, 192, 512):
+                archive.writestr(f'dist-worker/icons/vault-{size}.png', '')
+                archive.writestr(f'dist-worker/icons/vault-{size}-{build}.png', '')
+        data = stream.getvalue()
+        publisher.unpack_verified(data, digest(data), directory, extended=True, asset_dir='dist-worker', password=True)
+        publisher.check_password_worker(directory, worker)
+        with self.assertRaisesRegex(publisher.Rejected, 'approved password Worker'):
+            publisher.check_password_worker(directory, 'other')
+        config['assets']['run_worker_first'] = False
+        (directory / 'wrangler.json').write_text(json.dumps(config))
+        with self.assertRaisesRegex(publisher.Rejected, 'deployment settings'):
+            publisher.check_password_worker(directory, worker)
+        config['assets']['run_worker_first'] = True
+        (directory / 'wrangler.json').write_text(json.dumps(config))
+        (directory / 'dist-worker' / '_routes.json').touch()
+        with self.assertRaisesRegex(publisher.Rejected, 'Unexpected password Worker assets'):
+            publisher.check_password_worker(directory, worker)
+
     def test_ledger_reuses_shared_environments_without_another_workers_token(self):
         workflow = (Path(__file__).parent / '.github/workflows/publish.yml').read_text(encoding='utf-8')
         production, validation = workflow.split('\n  isolated:', 1)
@@ -80,6 +117,7 @@ class PublisherTests(TestCase):
             'fridge': ('spa-worker-production', 'spa-worker-production'),
             'ledger': ('ledger-worker-production', 'spa-worker-production'),
             'dtr': ('dtr-worker-production', 'bound-worker-production'),
+            'password': ('password-worker-production', 'bound-worker-production'),
         }
         declared = selection.split('        options:\n', 1)[1].split('      source_run:', 1)[0]
         self.assertEqual({line.strip().removeprefix('- ') for line in declared.splitlines()},
@@ -91,6 +129,7 @@ class PublisherTests(TestCase):
         self.assertNotIn('CLOUDFLARE_API_TOKEN', verify)
         self.assertIn('APPROVED_ARTIFACT: ${{ steps.approval.outputs.artifact }}', deploy)
         self.assertIn("profile == 'dtr-worker-production' && secrets.DTR_CLOUDFLARE_API_TOKEN || needs.select.outputs.profile != 'dtr-worker-production' && (", deploy)
+        self.assertIn("profile == 'password-worker-production' && secrets.PASSWORD_CLOUDFLARE_API_TOKEN || needs.select.outputs.profile != 'password-worker-production' && (", deploy)
         self.assertEqual(workflow.count('name: Deploy privately built artifact'), 1)
         self.assertEqual(workflow.count('      - name: Verify privately built artifact'), 1)
         for other in workflow_directory.iterdir():
