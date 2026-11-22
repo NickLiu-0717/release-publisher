@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 import os
+import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase, mock
@@ -56,15 +57,63 @@ class PublisherTests(TestCase):
     def test_ledger_reuses_shared_environments_without_another_workers_token(self):
         workflow = (Path(__file__).parent / '.github/workflows/publish.yml').read_text(encoding='utf-8')
         production, validation = workflow.split('\n  isolated:', 1)
-        self.assertIn("(inputs.ledger_worker || inputs.spa_worker) && 'spa-worker-production'", production)
+        self.assertIn('ledger) profile=ledger-worker-production; environment=spa-worker-production', production)
         self.assertNotIn('environment: ledger-worker-production', workflow)
         self.assertIn('environment: handoff-validation', validation)
         self.assertIn("inputs.ledger_worker && inputs.publish", production)
         self.assertIn('!inputs.publish', validation)
-        self.assertIn('secrets.LEDGER_CLOUDFLARE_API_TOKEN || !inputs.ledger_worker && secrets.CLOUDFLARE_API_TOKEN', production)
+        self.assertIn("secrets.LEDGER_CLOUDFLARE_API_TOKEN || needs.select.outputs.profile != 'ledger-worker-production' && secrets.CLOUDFLARE_API_TOKEN", production)
         self.assertNotIn('CLOUDFLARE_API_TOKEN', validation)
         for job in (production, validation):
             self.assertIn('private-key: ${{ secrets.HANDOFF_APP_PRIVATE_KEY }}', job)
+
+    def test_workflow_dispatch_maps_every_app_to_the_same_approval_step(self):
+        workflow_directory = Path(__file__).parent / '.github/workflows'
+        workflow = (workflow_directory / 'publish.yml').read_text(encoding='utf-8')
+        selection, production = workflow.split('\n  publish:', 1)
+        production = production.split('\n  isolated:', 1)[0]
+        script = selection.split('        run: |\n', 1)[1].strip('\n')
+        choices = {
+            'fitness': ('production', 'production'),
+            'calendar': ('bound-worker', 'bound-worker-production'),
+            'split': ('routed-worker-production', 'routed-worker-production'),
+            'fridge': ('spa-worker-production', 'spa-worker-production'),
+            'ledger': ('ledger-worker-production', 'spa-worker-production'),
+        }
+        declared = selection.split('        options:\n', 1)[1].split('      source_run:', 1)[0]
+        self.assertEqual({line.strip().removeprefix('- ') for line in declared.splitlines()},
+                         {'legacy', *choices})
+        self.assertNotIn('APPROVED_ARTIFACT_DIGEST', workflow)
+        verify = production.split('name: Verify privately built artifact', 1)[1].split('      - if: inputs.publish', 1)[0]
+        deploy = production.split('name: Deploy privately built artifact', 1)[1]
+        self.assertIn("RECORD_ARTIFACT_APPROVAL: 'true'", verify)
+        self.assertNotIn('CLOUDFLARE_API_TOKEN', verify)
+        self.assertIn('APPROVED_ARTIFACT: ${{ steps.approval.outputs.artifact }}', deploy)
+        self.assertEqual(workflow.count('name: Deploy privately built artifact'), 1)
+        self.assertEqual(workflow.count('      - name: Verify privately built artifact'), 1)
+        for other in workflow_directory.iterdir():
+            if other.name == 'publish.yml' or other.suffix not in {'.yml', '.yaml'}:
+                continue
+            content = other.read_text(encoding='utf-8')
+            for name in ('CLOUDFLARE_API_TOKEN', 'bound-worker-production', 'routed-worker-production',
+                         'spa-worker-production'):
+                self.assertNotIn(name, content, f'{other.name} must use the shared publishing workflow')
+            self.assertNotRegex(content, r'(?m)^\s*(?:environment:\s*|name:\s*)production\s*$',
+                                f'{other.name} must use the shared publishing workflow')
+        output = self.directory / 'selection'
+        env = {**os.environ, **dict.fromkeys(('LEDGER', 'SPA', 'ROUTED', 'BOUND', 'ISOLATED'), 'false'),
+               'GITHUB_OUTPUT': str(output)}
+        for project, (profile, environment) in choices.items():
+            with self.subTest(project=project):
+                output.write_text('')
+                subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', script], check=True,
+                               env={**env, 'PROJECT': project})
+                self.assertEqual(output.read_text(), f'profile={profile}\nenvironment={environment}\n')
+        for overrides in ({'PROJECT': 'unknown'}, {'PROJECT': 'ledger', 'SPA': 'true'}):
+            output.write_text('')
+            result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', script], env={**env, **overrides})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(output.read_text(), '')
 
     def setUp(self):
         self.workspace = TemporaryDirectory()
@@ -75,6 +124,7 @@ class PublisherTests(TestCase):
                     'head_sha': SHA, 'run_attempt': 2}
         self.jobs = {'jobs': [{'name': 'verify', 'conclusion': 'success',
                                'steps': [{'name': publisher.VERIFIED_STEP, 'conclusion': 'success'}]}]}
+        self.jobs['jobs'].extend({'name': name, 'conclusion': 'success'} for name in ('plan', 'prepare'))
         self.artifacts = {'artifacts': [{'id': 9, 'name': 'verified-handoff-5-2', 'expired': False,
                                          'digest': digest(package())}]}
 
@@ -159,6 +209,13 @@ class PublisherTests(TestCase):
         with self.assertRaisesRegex(publisher.Rejected, 'verification did not produce'):
             publisher.select_artifact(self.read, 'example/private', SHA, '5')
 
+    def test_completed_run_must_include_successful_plan_and_prepare(self):
+        for name in ('plan', 'prepare'):
+            job = next(job for job in self.jobs['jobs'] if job['name'] == name)
+            with self.subTest(job=name), mock.patch.dict(job, conclusion='skipped'):
+                with self.assertRaisesRegex(publisher.Rejected, f'Source {name} job did not succeed'):
+                    publisher.select_artifact(self.read, 'example/private', SHA, '5')
+
     def test_rejects_changed_archive_and_parent_paths(self):
         with self.assertRaisesRegex(publisher.Rejected, 'digest differs'):
             publisher.unpack_verified(package(), 'sha256:' + '0' * 64, self.directory)
@@ -198,14 +255,27 @@ class PublisherTests(TestCase):
 
         with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(publisher, 'github', side_effect=fetch), \
                 mock.patch.object(publisher.subprocess, 'run', side_effect=upload) as uploader:
-            publisher.run()
+            output = self.directory / 'approval'
+            with mock.patch.dict(os.environ, {'RECORD_ARTIFACT_APPROVAL': 'true', 'GITHUB_OUTPUT': str(output)}):
+                publisher.run()
             uploader.assert_not_called()
             os.environ['PUBLISH'] = 'true'
+            os.environ['APPROVED_ARTIFACT'] = output.read_text().strip().removeprefix('artifact=')
+            self.assertEqual(os.environ['APPROVED_ARTIFACT'], f'9:{digest(data)}')
             publisher.run()
             uploader.assert_called_once()
+            self.artifacts['artifacts'][0]['id'] = 10
+            with self.assertRaisesRegex(publisher.Rejected, 'approved ID and digest'):
+                publisher.run()
+            self.artifacts['artifacts'][0]['id'] = 9
             data = package(name='wrong-worker')
+            with self.assertRaisesRegex(publisher.Rejected, 'archive digest differs'):
+                publisher.run()
             self.artifacts['artifacts'][0]['digest'] = digest(data)
-            with self.assertRaises(publisher.Rejected):
+            with self.assertRaisesRegex(publisher.Rejected, 'approved ID and digest'):
+                publisher.run()
+            os.environ['APPROVED_ARTIFACT'] = f'9:{digest(data)}'
+            with self.assertRaisesRegex(publisher.Rejected, 'Worker target'):
                 publisher.run()
             uploader.assert_called_once()
 
@@ -279,6 +349,7 @@ class PublisherTests(TestCase):
             publisher.run()
             uploader.assert_not_called()
             os.environ['PUBLISH'] = 'true'
+            os.environ['APPROVED_ARTIFACT'] = f'9:{digest(data)}'
             publisher.run()
             uploader.assert_called_once()
             os.environ['WORKER_DATABASE_ID'] = 'bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee'
@@ -313,13 +384,13 @@ class PublisherTests(TestCase):
             'HANDOFF_PROFILE': 'routed-worker-production', 'PUBLISH': 'true',
             'HANDOFF_ACTIONS_READ': 'source-fixture', 'SOURCE_REPOSITORY': 'example/private',
             'SOURCE_WORKFLOW_SHA': SHA, 'SOURCE_WORKFLOW_BRANCH': 'main', 'SOURCE_RUN_ID': '5',
-            'APPROVED_ARTIFACT_DIGEST': 'sha256:' + '0' * 64,
         }
-        for profile in ('routed-worker-production', 'spa-worker-production'):
+        for profile in ('production', 'bound-worker', 'routed-worker-production',
+                        'spa-worker-production', 'ledger-worker-production'):
             env['HANDOFF_PROFILE'] = profile
             with self.subTest(profile=profile), mock.patch.dict(os.environ, env, clear=True), \
                     mock.patch.object(publisher, 'github', side_effect=lambda path, token: self.read(path)), \
                     mock.patch.object(publisher.subprocess, 'run') as uploader:
-                with self.assertRaisesRegex(publisher.Rejected, 'separately approved digest'):
+                with self.assertRaisesRegex(publisher.Rejected, 'approved ID and digest'):
                     publisher.run()
                 uploader.assert_not_called()

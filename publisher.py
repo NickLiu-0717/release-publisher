@@ -71,6 +71,10 @@ def select_artifact(read, repository, trusted_sha, run_id, branch='main'):
     attempt = run['run_attempt']
     require(type(attempt) is int and attempt > 0, 'Invalid source run attempt.')
     jobs = read(f'{run_path}/attempts/{attempt}/jobs?per_page=100')['jobs']
+    for required in ('plan', 'prepare'):
+        matches = [job for job in jobs if job['name'] == required]
+        require(len(matches) == 1 and matches[0]['conclusion'] == 'success',
+                f'Source {required} job did not succeed.')
     verify = [job for job in jobs if job['name'] == 'verify' and job['conclusion'] == 'success' and
               any(step['name'] == VERIFIED_STEP and step['conclusion'] == 'success' for step in job['steps'])]
     require(len(verify) == 1, 'Source verification did not produce an approved handoff.')
@@ -237,7 +241,10 @@ def run():
     extended = profile != 'production'
     spa = profile in ('spa-worker', 'spa-worker-production')
     ledger = profile == 'ledger-worker-production'
-    require(profile not in ('isolated', 'routed-worker', 'spa-worker') or os.environ.get('PUBLISH') != 'true',
+    publishing = os.environ.get('PUBLISH') == 'true'
+    approval_output = os.environ.get('RECORD_ARTIFACT_APPROVAL') == 'true'
+    require(not (publishing and approval_output), 'Artifact approval cannot deploy.')
+    require(profile not in ('isolated', 'routed-worker', 'spa-worker') or not (publishing or approval_output),
             'Validation-only handoff cannot deploy.')
     token = os.environ['HANDOFF_ACTIONS_READ']
     require(bool(token), 'Private artifact read access has not been configured.')
@@ -245,12 +252,10 @@ def run():
     branch = os.environ['SOURCE_WORKFLOW_BRANCH'] if extended else 'main'
     artifact = select_artifact(lambda path: github(path, token), repository,
                                os.environ['SOURCE_WORKFLOW_SHA'], os.environ['SOURCE_RUN_ID'], branch)
-    if profile in ('routed-worker-production', 'spa-worker-production'):
-        require(os.environ.get('PUBLISH') == 'true', 'Production profile must be explicitly dispatched to deploy.')
-    if profile in ('routed-worker-production', 'spa-worker-production') or (ledger and os.environ.get('PUBLISH') == 'true'):
-        approved_digest = os.environ.get('APPROVED_ARTIFACT_DIGEST', '')
-        require(re.fullmatch(r'sha256:[a-f0-9]{64}', approved_digest) and artifact['digest'] == approved_digest,
-                'Artifact does not match the separately approved digest.')
+    identity = f'{artifact["id"]}:{artifact["digest"]}'
+    if publishing:
+        require(os.environ.get('APPROVED_ARTIFACT') == identity,
+                'Artifact does not match the independently approved ID and digest.')
     data = github(f'/repos/{repository}/actions/artifacts/{artifact["id"]}/zip', token, download=True,
                   limit=MAX_ISOLATED_ARCHIVE if extended else MAX_ARCHIVE)
     with tempfile.TemporaryDirectory(prefix='verified-worker-') as workspace:
@@ -272,7 +277,10 @@ def run():
         else:
             check_worker(*settings)
         print('Verified the approved private artifact and its deployment settings.')
-        if os.environ.get('PUBLISH') != 'true':
+        if approval_output:
+            with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as outputs:
+                outputs.write(f'artifact={identity}\n')
+        if not publishing:
             return
         account = os.environ.get('CLOUDFLARE_ACCOUNT_ID', '')
         credential = os.environ.get('CLOUDFLARE_API_TOKEN', '')
