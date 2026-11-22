@@ -79,6 +79,7 @@ class PublisherTests(TestCase):
             'split': ('routed-worker-production', 'routed-worker-production'),
             'fridge': ('spa-worker-production', 'spa-worker-production'),
             'ledger': ('ledger-worker-production', 'spa-worker-production'),
+            'dtr': ('dtr-worker-production', 'bound-worker-production'),
         }
         declared = selection.split('        options:\n', 1)[1].split('      source_run:', 1)[0]
         self.assertEqual({line.strip().removeprefix('- ') for line in declared.splitlines()},
@@ -89,6 +90,7 @@ class PublisherTests(TestCase):
         self.assertIn("RECORD_ARTIFACT_APPROVAL: 'true'", verify)
         self.assertNotIn('CLOUDFLARE_API_TOKEN', verify)
         self.assertIn('APPROVED_ARTIFACT: ${{ steps.approval.outputs.artifact }}', deploy)
+        self.assertIn("profile == 'dtr-worker-production' && secrets.DTR_CLOUDFLARE_API_TOKEN || needs.select.outputs.profile != 'dtr-worker-production' && (", deploy)
         self.assertEqual(workflow.count('name: Deploy privately built artifact'), 1)
         self.assertEqual(workflow.count('      - name: Verify privately built artifact'), 1)
         for other in workflow_directory.iterdir():
@@ -170,6 +172,39 @@ class PublisherTests(TestCase):
         (self.directory / 'wrangler.json').write_text(json.dumps(config), encoding='utf-8')
         with self.assertRaisesRegex(publisher.Rejected, 'Unexpected Workers'):
             publisher.check_spa_worker(self.directory, 'example', DATABASE, 'example-data')
+
+    def test_dtr_handoff_requires_existing_binding_and_production_assets(self):
+        config = {
+            'name': 'dtr-mobile', 'main': 'worker.js', 'compatibility_date': '2026-11-03',
+            'compatibility_flags': ['nodejs_compat'], 'workers_dev': True, 'preview_urls': False,
+            'keep_vars': True,
+            'assets': {'directory': './dist', 'binding': 'ASSETS', 'run_worker_first': True,
+                       'not_found_handling': '404-page'},
+            'd1_databases': [{'binding': 'SYNC_DB', 'database_name': 'dtr-mobile-sync', 'database_id': DATABASE}],
+        }
+        stream = io.BytesIO()
+        with ZipFile(stream, 'w') as archive:
+            archive.writestr('wrangler.json', json.dumps(config))
+            archive.writestr('worker.js', 'export default {};')
+            archive.writestr('dist/index.html', '<meta name="apple-mobile-web-app-title" content="DTR"><link rel="apple-touch-icon" href="/apple-touch-icon.png?v=1">')
+            archive.writestr('dist/apple-touch-icon.png', b'\x89PNG\r\n\x1a\n')
+            for name in ('app.js', 'boot.js', 'drive-save.js', 'dtr-import.js', 'gmail-send.js'):
+                archive.writestr(f'dist/{name}', '// sample asset')
+        data = stream.getvalue()
+        publisher.unpack_verified(data, digest(data), self.directory, extended=True, asset_dir='dist', dtr=True)
+        publisher.check_dtr_worker(self.directory, 'dtr-mobile', DATABASE)
+        with self.assertRaisesRegex(publisher.Rejected, 'Unexpected DTR deployment settings'):
+            publisher.check_dtr_worker(self.directory, 'dtr-mobile', 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff')
+        config['assets']['run_worker_first'] = False
+        path = self.directory / 'wrangler.json'
+        path.write_text(json.dumps(config))
+        with self.assertRaisesRegex(publisher.Rejected, 'Unexpected DTR deployment settings'):
+            publisher.check_dtr_worker(self.directory, 'dtr-mobile', DATABASE)
+        config['assets']['run_worker_first'] = True
+        path.write_text(json.dumps(config))
+        (self.directory / 'dist/dtr-import.js').write_text('fixture-picker-key')
+        with self.assertRaisesRegex(publisher.Rejected, 'Synthetic settings'):
+            publisher.check_dtr_worker(self.directory, 'dtr-mobile', DATABASE)
 
     def test_ledger_handoff_rejects_changed_bindings_and_schedule(self):
         config = {
@@ -386,7 +421,7 @@ class PublisherTests(TestCase):
             'SOURCE_WORKFLOW_SHA': SHA, 'SOURCE_WORKFLOW_BRANCH': 'main', 'SOURCE_RUN_ID': '5',
         }
         for profile in ('production', 'bound-worker', 'routed-worker-production',
-                        'spa-worker-production', 'ledger-worker-production'):
+                        'spa-worker-production', 'ledger-worker-production', 'dtr-worker-production'):
             env['HANDOFF_PROFILE'] = profile
             with self.subTest(profile=profile), mock.patch.dict(os.environ, env, clear=True), \
                     mock.patch.object(publisher, 'github', side_effect=lambda path, token: self.read(path)), \

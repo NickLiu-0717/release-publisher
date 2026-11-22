@@ -88,7 +88,7 @@ def select_artifact(read, repository, trusted_sha, run_id, branch='main'):
     return artifact
 
 
-def unpack_verified(data, expected_digest, directory, extended=False, asset_dir='public', ledger=False):
+def unpack_verified(data, expected_digest, directory, extended=False, asset_dir='public', ledger=False, dtr=False):
     limit = MAX_ISOLATED_ARCHIVE if extended else MAX_ARCHIVE
     require(len(data) <= limit, 'Artifact archive is too large.')
     digest = 'sha256:' + hashlib.sha256(data).hexdigest()
@@ -117,7 +117,10 @@ def unpack_verified(data, expected_digest, directory, extended=False, asset_dir=
             with destination.open('xb') as output:
                 output.write(archive.read(entry))
         required = {'worker.js', 'wrangler.json', f'{asset_dir}/index.html'}
-        if extended:
+        if dtr:
+            required.update(f'{asset_dir}/{name}' for name in ('app.js', 'boot.js', 'apple-touch-icon.png', 'drive-save.js',
+                                                               'dtr-import.js', 'gmail-send.js'))
+        elif extended:
             required.update(f'{asset_dir}/{name}' for name in ('sw.js', 'manifest.webmanifest'))
             if not ledger:
                 required.add(f'{asset_dir}/app.mjs')
@@ -233,14 +236,40 @@ def check_installation(directory, asset_dir='public', expected_id='/'):
             'Unexpected installation identity.')
 
 
+def check_dtr_worker(directory, worker, database):
+    require(worker == 'dtr-mobile' and database != FIXTURE_DATABASE and
+            re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', database),
+            'Missing approved DTR Worker or D1 binding.')
+    config = json.loads((directory / 'wrangler.json').read_text(encoding='utf-8'))
+    require(config == {
+        'name': worker, 'main': 'worker.js', 'compatibility_date': '2026-11-03',
+        'compatibility_flags': ['nodejs_compat'], 'workers_dev': True, 'preview_urls': False,
+        'keep_vars': True,
+        'assets': {'directory': './dist', 'binding': 'ASSETS', 'run_worker_first': True,
+                   'not_found_handling': '404-page'},
+        'd1_databases': [{'binding': 'SYNC_DB', 'database_name': 'dtr-mobile-sync', 'database_id': database}],
+    }, 'Unexpected DTR deployment settings.')
+    assets = directory / 'dist'
+    html = (assets / 'index.html').read_text(encoding='utf-8')
+    require('name="apple-mobile-web-app-title" content="DTR"' in html and
+            'rel="apple-touch-icon" href="/apple-touch-icon.png?' in html and
+            (assets / 'apple-touch-icon.png').read_bytes().startswith(b'\x89PNG\r\n\x1a\n'),
+            'Unexpected DTR installation identity.')
+    markers = ('fixture-dtr-folder', 'dtr-owner@example.test', 'dtr-ci.apps.googleusercontent.com', 'fixture-picker-key')
+    require(not any(marker in (assets / filename).read_text(encoding='utf-8')
+                    for filename in ('drive-save.js', 'dtr-import.js', 'gmail-send.js', 'index.html')
+                    for marker in markers), 'Synthetic settings are present in the DTR production artifact.')
+
+
 def run():
     profile = os.environ.get('HANDOFF_PROFILE', 'production')
     require(profile in ('production', 'isolated', 'bound-worker', 'routed-worker', 'routed-worker-production',
-                        'spa-worker', 'spa-worker-production', 'ledger-worker-production'), 'Unknown Worker handoff profile.')
+                        'spa-worker', 'spa-worker-production', 'ledger-worker-production', 'dtr-worker-production'), 'Unknown Worker handoff profile.')
     isolated = profile == 'isolated'
     extended = profile != 'production'
     spa = profile in ('spa-worker', 'spa-worker-production')
     ledger = profile == 'ledger-worker-production'
+    dtr = profile == 'dtr-worker-production'
     publishing = os.environ.get('PUBLISH') == 'true'
     approval_output = os.environ.get('RECORD_ARTIFACT_APPROVAL') == 'true'
     require(not (publishing and approval_output), 'Artifact approval cannot deploy.')
@@ -260,7 +289,8 @@ def run():
                   limit=MAX_ISOLATED_ARCHIVE if extended else MAX_ARCHIVE)
     with tempfile.TemporaryDirectory(prefix='verified-worker-') as workspace:
         directory = Path(workspace)
-        unpack_verified(data, artifact['digest'], directory, extended, 'dist' if spa or ledger else 'public', ledger)
+        unpack_verified(data, artifact['digest'], directory, extended, 'dist' if spa or ledger or dtr else 'public',
+                        ledger=ledger, dtr=dtr)
         if isolated:
             check_isolated_worker(directory, os.environ['WORKER_NAME'], os.environ['WORKER_DATABASE_ID'])
             print('Verified the isolated private artifact and its synthetic settings.')
@@ -270,6 +300,8 @@ def run():
             check_bound_worker(*settings, os.environ['WORKER_SERVICE'], os.environ['WORKER_ENTRYPOINT'])
         elif ledger:
             check_ledger_worker(*settings)
+        elif dtr:
+            check_dtr_worker(*settings)
         elif spa:
             check_spa_worker(*settings, os.environ['WORKER_DATABASE_NAME'])
         elif extended:
