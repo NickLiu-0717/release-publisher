@@ -88,7 +88,7 @@ def select_artifact(read, repository, trusted_sha, run_id, branch='main'):
     return artifact
 
 
-def unpack_verified(data, expected_digest, directory, extended=False, asset_dir='public', ledger=False, dtr=False):
+def unpack_verified(data, expected_digest, directory, extended=False, asset_dir='public', ledger=False, dtr=False, password=False):
     limit = MAX_ISOLATED_ARCHIVE if extended else MAX_ARCHIVE
     require(len(data) <= limit, 'Artifact archive is too large.')
     digest = 'sha256:' + hashlib.sha256(data).hexdigest()
@@ -122,7 +122,7 @@ def unpack_verified(data, expected_digest, directory, extended=False, asset_dir=
                                                                'dtr-import.js', 'gmail-send.js'))
         elif extended:
             required.update(f'{asset_dir}/{name}' for name in ('sw.js', 'manifest.webmanifest'))
-            if not ledger:
+            if not (ledger or password):
                 required.add(f'{asset_dir}/app.mjs')
         else:
             required.add('public/boot.js')
@@ -261,15 +261,43 @@ def check_dtr_worker(directory, worker, database):
                     for marker in markers), 'Synthetic settings are present in the DTR production artifact.')
 
 
+def check_password_worker(directory, worker):
+    require(worker == 'gnliu-password-vault', 'Missing approved password Worker target.')
+    config = json.loads((directory / 'wrangler.json').read_text(encoding='utf-8'))
+    require(config == {
+        'name': worker, 'main': 'worker.js', 'compatibility_date': '2026-11-20',
+        'workers_dev': True, 'preview_urls': False, 'keep_vars': True,
+        'assets': {'directory': './dist-worker', 'binding': 'ASSETS', 'run_worker_first': True,
+                   'html_handling': 'none', 'not_found_handling': 'none'},
+        'vars': {'VAULT_HOST': 'gnliu-password-vault.gnliu.workers.dev'},
+    }, 'Unexpected password Worker deployment settings.')
+    assets = directory / 'dist-worker'
+    manifest = json.loads((assets / 'manifest.webmanifest').read_text(encoding='utf-8'))
+    require(all(manifest.get(key) == '/' for key in ('id', 'scope', 'start_url')) and
+            manifest.get('display') == 'standalone', 'Unexpected password installation identity.')
+    html = (assets / 'index.html').read_text(encoding='utf-8')
+    build = re.search(r'<meta name="vault-build" content="([0-9a-f]{16})">', html)
+    icon = re.search(r'"/icons/vault-180-([0-9a-f]{16})\.png"', html)
+    require(build is not None and icon is not None, 'Missing password asset versions.')
+    expected = {'index.html', 'sw.js', 'manifest.webmanifest'}
+    expected.update(f'_app/{build[1]}/{name}' for name in (
+        'app.css', 'app.js', 'passkey.js', 'pwa-mode.js', 'storage.js', 'updates.js', 'vault.js'))
+    for size in (180, 192, 512):
+        expected.update((f'icons/vault-{size}.png', f'icons/vault-{size}-{icon[1]}.png'))
+    actual = {path.relative_to(assets).as_posix() for path in assets.rglob('*') if path.is_file()}
+    require(actual == expected, 'Unexpected password Worker assets.')
+
+
 def run():
     profile = os.environ.get('HANDOFF_PROFILE', 'production')
     require(profile in ('production', 'isolated', 'bound-worker', 'routed-worker', 'routed-worker-production',
-                        'spa-worker', 'spa-worker-production', 'ledger-worker-production', 'dtr-worker-production'), 'Unknown Worker handoff profile.')
+                        'spa-worker', 'spa-worker-production', 'ledger-worker-production', 'dtr-worker-production', 'password-worker-production'), 'Unknown Worker handoff profile.')
     isolated = profile == 'isolated'
     extended = profile != 'production'
     spa = profile in ('spa-worker', 'spa-worker-production')
     ledger = profile == 'ledger-worker-production'
     dtr = profile == 'dtr-worker-production'
+    password = profile == 'password-worker-production'
     publishing = os.environ.get('PUBLISH') == 'true'
     approval_output = os.environ.get('RECORD_ARTIFACT_APPROVAL') == 'true'
     require(not (publishing and approval_output), 'Artifact approval cannot deploy.')
@@ -289,14 +317,17 @@ def run():
                   limit=MAX_ISOLATED_ARCHIVE if extended else MAX_ARCHIVE)
     with tempfile.TemporaryDirectory(prefix='verified-worker-') as workspace:
         directory = Path(workspace)
-        unpack_verified(data, artifact['digest'], directory, extended, 'dist' if spa or ledger or dtr else 'public',
-                        ledger=ledger, dtr=dtr)
+        asset_dir = 'dist-worker' if password else 'dist' if spa or ledger or dtr else 'public'
+        unpack_verified(data, artifact['digest'], directory, extended, asset_dir,
+                        ledger=ledger, dtr=dtr, password=password)
         if isolated:
             check_isolated_worker(directory, os.environ['WORKER_NAME'], os.environ['WORKER_DATABASE_ID'])
             print('Verified the isolated private artifact and its synthetic settings.')
             return
         settings = (directory, os.environ['WORKER_NAME'], os.environ['WORKER_DATABASE_ID'])
-        if profile in ('routed-worker', 'routed-worker-production'):
+        if password:
+            check_password_worker(directory, os.environ['WORKER_NAME'])
+        elif profile in ('routed-worker', 'routed-worker-production'):
             check_bound_worker(*settings, os.environ['WORKER_SERVICE'], os.environ['WORKER_ENTRYPOINT'])
         elif ledger:
             check_ledger_worker(*settings)
