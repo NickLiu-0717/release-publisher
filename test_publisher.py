@@ -79,6 +79,9 @@ class PublisherTests(TestCase):
             'fridge': ('spa-worker-production', 'spa-worker-production'),
             'ledger': ('ledger-worker-production', 'spa-worker-production'),
         }
+        declared = selection.split('        options:\n', 1)[1].split('      source_run:', 1)[0]
+        self.assertEqual({line.strip().removeprefix('- ') for line in declared.splitlines()},
+                         {'legacy', *choices})
         self.assertNotIn('APPROVED_ARTIFACT_DIGEST', workflow)
         verify = production.split('name: Verify privately built artifact', 1)[1].split('      - if: inputs.publish', 1)[0]
         deploy = production.split('name: Deploy privately built artifact', 1)[1]
