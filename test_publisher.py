@@ -68,7 +68,8 @@ class PublisherTests(TestCase):
             self.assertIn('private-key: ${{ secrets.HANDOFF_APP_PRIVATE_KEY }}', job)
 
     def test_workflow_dispatch_maps_every_app_to_the_same_approval_step(self):
-        workflow = (Path(__file__).parent / '.github/workflows/publish.yml').read_text(encoding='utf-8')
+        workflow_directory = Path(__file__).parent / '.github/workflows'
+        workflow = (workflow_directory / 'publish.yml').read_text(encoding='utf-8')
         selection, production = workflow.split('\n  publish:', 1)
         production = production.split('\n  isolated:', 1)[0]
         script = selection.split('        run: |\n', 1)[1].strip('\n')
@@ -88,6 +89,17 @@ class PublisherTests(TestCase):
         self.assertIn("RECORD_ARTIFACT_APPROVAL: 'true'", verify)
         self.assertNotIn('CLOUDFLARE_API_TOKEN', verify)
         self.assertIn('APPROVED_ARTIFACT: ${{ steps.approval.outputs.artifact }}', deploy)
+        self.assertEqual(workflow.count('name: Deploy privately built artifact'), 1)
+        self.assertEqual(workflow.count('      - name: Verify privately built artifact'), 1)
+        for other in workflow_directory.iterdir():
+            if other.name == 'publish.yml' or other.suffix not in {'.yml', '.yaml'}:
+                continue
+            content = other.read_text(encoding='utf-8')
+            for name in ('CLOUDFLARE_API_TOKEN', 'bound-worker-production', 'routed-worker-production',
+                         'spa-worker-production'):
+                self.assertNotIn(name, content, f'{other.name} must use the shared publishing workflow')
+            self.assertNotRegex(content, r'(?m)^\s*(?:environment:\s*|name:\s*)production\s*$',
+                                f'{other.name} must use the shared publishing workflow')
         output = self.directory / 'selection'
         env = {**os.environ, **dict.fromkeys(('LEDGER', 'SPA', 'ROUTED', 'BOUND', 'ISOLATED'), 'false'),
                'GITHUB_OUTPUT': str(output)}
