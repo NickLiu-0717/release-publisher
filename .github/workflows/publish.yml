@@ -2,6 +2,17 @@ name: Verify or publish approved artifact
 on:
   workflow_dispatch:
     inputs:
+      project:
+        description: App to verify or publish
+        type: choice
+        default: legacy
+        options:
+          - legacy
+          - fitness
+          - calendar
+          - split
+          - fridge
+          - ledger
       source_run:
         description: Number of a successful private handoff run
         required: true
@@ -40,18 +51,61 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  select:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    outputs:
+      profile: ${{ steps.app.outputs.profile }}
+      environment: ${{ steps.app.outputs.environment }}
+    steps:
+      - id: app
+        env:
+          PROJECT: ${{ inputs.project }}
+          LEDGER: ${{ inputs.ledger_worker }}
+          SPA: ${{ inputs.spa_worker }}
+          ROUTED: ${{ inputs.routed_worker }}
+          BOUND: ${{ inputs.bound_worker }}
+          ISOLATED: ${{ inputs.isolated }}
+        run: |
+          if [[ "$PROJECT" != legacy ]]; then
+            for flag in "$LEDGER" "$SPA" "$ROUTED" "$BOUND" "$ISOLATED"; do
+              [[ "$flag" == false ]] || exit 1
+            done
+          else
+            PROJECT=fitness
+            if [[ "$LEDGER" == true ]]; then PROJECT=ledger
+            elif [[ "$SPA" == true ]]; then PROJECT=fridge
+            elif [[ "$ROUTED" == true ]]; then PROJECT=split
+            elif [[ "$BOUND" == true ]]; then PROJECT=calendar
+            fi
+          fi
+          case "$PROJECT" in
+            fitness) profile=production; environment=production ;;
+            calendar) profile=bound-worker; environment=bound-worker-production ;;
+            split) profile=routed-worker-production; environment=routed-worker-production ;;
+            fridge) profile=spa-worker-production; environment=spa-worker-production ;;
+            ledger) profile=ledger-worker-production; environment=spa-worker-production ;;
+            *) exit 1 ;;
+          esac
+          printf 'profile=%s\nenvironment=%s\n' "$profile" "$environment" >> "$GITHUB_OUTPUT"
+
   publish:
-    if: github.ref == 'refs/heads/main' && !inputs.isolated && ((inputs.ledger_worker && inputs.publish && !inputs.spa_worker && !inputs.routed_worker && !inputs.bound_worker) || (!inputs.ledger_worker && ((!inputs.spa_worker && (!inputs.routed_worker || (inputs.publish && !inputs.bound_worker))) || (inputs.spa_worker && inputs.publish && !inputs.routed_worker && !inputs.bound_worker))))
+    needs: select
+    if: github.ref == 'refs/heads/main' && (inputs.project != 'legacy' || (!inputs.isolated && ((inputs.ledger_worker && inputs.publish && !inputs.spa_worker && !inputs.routed_worker && !inputs.bound_worker) || (!inputs.ledger_worker && ((!inputs.spa_worker && (!inputs.routed_worker || (inputs.publish && !inputs.bound_worker))) || (inputs.spa_worker && inputs.publish && !inputs.routed_worker && !inputs.bound_worker))))))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    environment: ${{ (inputs.ledger_worker || inputs.spa_worker) && 'spa-worker-production' || inputs.routed_worker && 'routed-worker-production' || inputs.bound_worker && 'bound-worker-production' || 'production' }}
+    environment: ${{ needs.select.outputs.environment }}
     env:
-      HANDOFF_PROFILE: ${{ inputs.ledger_worker && 'ledger-worker-production' || inputs.spa_worker && 'spa-worker-production' || inputs.routed_worker && 'routed-worker-production' || inputs.bound_worker && 'bound-worker' || 'production' }}
+      HANDOFF_PROFILE: ${{ needs.select.outputs.profile }}
       SOURCE_RUN_ID: ${{ inputs.source_run }}
       SOURCE_REPOSITORY: ${{ secrets.SOURCE_REPOSITORY }}
-      SOURCE_WORKFLOW_BRANCH: ${{ inputs.ledger_worker && secrets.LEDGER_WORKFLOW_BRANCH || !inputs.ledger_worker && secrets.SOURCE_WORKFLOW_BRANCH }}
-      SOURCE_WORKFLOW_SHA: ${{ inputs.ledger_worker && secrets.LEDGER_WORKFLOW_SHA || !inputs.ledger_worker && secrets.SOURCE_WORKFLOW_SHA }}
-      WORKER_NAME: ${{ inputs.ledger_worker && secrets.LEDGER_WORKER_NAME || !inputs.ledger_worker && secrets.WORKER_NAME }}
+      SOURCE_WORKFLOW_BRANCH: ${{ needs.select.outputs.profile == 'ledger-worker-production' && secrets.LEDGER_WORKFLOW_BRANCH || needs.select.outputs.profile != 'ledger-worker-production' && secrets.SOURCE_WORKFLOW_BRANCH }}
+      SOURCE_WORKFLOW_SHA: ${{ needs.select.outputs.profile == 'ledger-worker-production' && secrets.LEDGER_WORKFLOW_SHA || needs.select.outputs.profile != 'ledger-worker-production' && secrets.SOURCE_WORKFLOW_SHA }}
+      WORKER_NAME: ${{ needs.select.outputs.profile == 'ledger-worker-production' && secrets.LEDGER_WORKER_NAME || needs.select.outputs.profile != 'ledger-worker-production' && secrets.WORKER_NAME }}
+      WORKER_DATABASE_ID: ${{ needs.select.outputs.profile == 'ledger-worker-production' && secrets.LEDGER_DATABASE_ID || needs.select.outputs.profile != 'ledger-worker-production' && secrets.WORKER_DATABASE_ID }}
+      WORKER_DATABASE_NAME: ${{ needs.select.outputs.profile == 'spa-worker-production' && secrets.WORKER_DATABASE_NAME }}
+      WORKER_SERVICE: ${{ needs.select.outputs.profile == 'routed-worker-production' && secrets.WORKER_SERVICE }}
+      WORKER_ENTRYPOINT: ${{ needs.select.outputs.profile == 'routed-worker-production' && secrets.WORKER_ENTRYPOINT }}
     steps:
       - name: Check out the exact protected workflow revision
         run: |
@@ -74,34 +128,33 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ secrets.HANDOFF_APP_REPOSITORY }}
           permission-actions: read
-      - if: inputs.publish
-        run: |
-          node -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)'
-          npm install --prefix "$RUNNER_TEMP/wrangler" --ignore-scripts --no-audit --no-fund wrangler@4.156.0
       - name: Verify privately built artifact
-        if: ${{ !inputs.publish }}
+        id: approval
         env:
           HANDOFF_ACTIONS_READ: ${{ steps.handoff-token.outputs.token }}
-          WORKER_DATABASE_ID: ${{ inputs.ledger_worker && secrets.LEDGER_DATABASE_ID || !inputs.ledger_worker && secrets.WORKER_DATABASE_ID }}
+          RECORD_ARTIFACT_APPROVAL: 'true'
         run: python3 publisher.py
+      - if: inputs.publish
+        env:
+          APPROVED_ARTIFACT: ${{ steps.approval.outputs.artifact }}
+        run: |
+          [[ -n "$APPROVED_ARTIFACT" ]]
+          node -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)'
+          npm install --prefix "$RUNNER_TEMP/wrangler" --ignore-scripts --no-audit --no-fund wrangler@4.156.0
       - name: Deploy privately built artifact
         if: inputs.publish
         env:
           PUBLISH: 'true'
           HANDOFF_ACTIONS_READ: ${{ steps.handoff-token.outputs.token }}
-          WORKER_DATABASE_ID: ${{ inputs.ledger_worker && secrets.LEDGER_DATABASE_ID || !inputs.ledger_worker && secrets.WORKER_DATABASE_ID }}
-          WORKER_DATABASE_NAME: ${{ inputs.spa_worker && secrets.WORKER_DATABASE_NAME }}
-          WORKER_SERVICE: ${{ inputs.routed_worker && secrets.WORKER_SERVICE }}
-          WORKER_ENTRYPOINT: ${{ inputs.routed_worker && secrets.WORKER_ENTRYPOINT }}
-          APPROVED_ARTIFACT_DIGEST: ${{ inputs.ledger_worker && secrets.LEDGER_APPROVED_ARTIFACT_DIGEST || !inputs.ledger_worker && (inputs.routed_worker || inputs.spa_worker) && secrets.APPROVED_ARTIFACT_DIGEST }}
+          APPROVED_ARTIFACT: ${{ steps.approval.outputs.artifact }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ inputs.ledger_worker && secrets.LEDGER_CLOUDFLARE_API_TOKEN || !inputs.ledger_worker && secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ needs.select.outputs.profile == 'ledger-worker-production' && secrets.LEDGER_CLOUDFLARE_API_TOKEN || needs.select.outputs.profile != 'ledger-worker-production' && secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           export WRANGLER_BIN="$RUNNER_TEMP/wrangler/node_modules/wrangler/bin/wrangler.js"
           python3 publisher.py
 
   isolated:
-    if: github.ref == 'refs/heads/main' && !inputs.publish && !inputs.bound_worker && ((inputs.ledger_worker && !inputs.isolated && !inputs.spa_worker && !inputs.routed_worker) || (!inputs.ledger_worker && ((!inputs.spa_worker && inputs.isolated != inputs.routed_worker) || (inputs.spa_worker && !inputs.isolated && !inputs.routed_worker))))
+    if: github.ref == 'refs/heads/main' && inputs.project == 'legacy' && !inputs.publish && !inputs.bound_worker && ((inputs.ledger_worker && !inputs.isolated && !inputs.spa_worker && !inputs.routed_worker) || (!inputs.ledger_worker && ((!inputs.spa_worker && inputs.isolated != inputs.routed_worker) || (inputs.spa_worker && !inputs.isolated && !inputs.routed_worker))))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     environment: handoff-validation
