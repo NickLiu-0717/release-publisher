@@ -88,7 +88,7 @@ def select_artifact(read, repository, trusted_sha, run_id, branch='main'):
     return artifact
 
 
-def unpack_verified(data, expected_digest, directory, extended=False, asset_dir='public', ledger=False, dtr=False, password=False):
+def unpack_verified(data, expected_digest, directory, extended=False, asset_dir='public', ledger=False, dtr=False, password=False, media_library=False):
     limit = MAX_ISOLATED_ARCHIVE if extended else MAX_ARCHIVE
     require(len(data) <= limit, 'Artifact archive is too large.')
     digest = 'sha256:' + hashlib.sha256(data).hexdigest()
@@ -122,7 +122,7 @@ def unpack_verified(data, expected_digest, directory, extended=False, asset_dir=
                                                                'dtr-import.js', 'gmail-send.js'))
         elif extended:
             required.update(f'{asset_dir}/{name}' for name in ('sw.js', 'manifest.webmanifest'))
-            if not (ledger or password):
+            if not (ledger or password or media_library):
                 required.add(f'{asset_dir}/app.mjs')
         else:
             required.add('public/boot.js')
@@ -236,6 +236,40 @@ def check_installation(directory, asset_dir='public', expected_id='/'):
             'Unexpected installation identity.')
 
 
+def check_media_library(directory, worker, database):
+    require(worker == 'media-library' and database != FIXTURE_DATABASE and
+            re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', database),
+            'Missing approved media library Worker or D1 binding.')
+    config = json.loads((directory / 'wrangler.json').read_text(encoding='utf-8'))
+    require(config == {
+        'name': worker, 'main': 'worker.js', 'compatibility_date': '2026-10-30',
+        'compatibility_flags': ['nodejs_compat'], 'workers_dev': True, 'preview_urls': False,
+        'keep_vars': True, 'assets': {'directory': './public', 'binding': 'ASSETS', 'run_worker_first': True},
+        'vars': {'APP_ORIGIN': f'https://{worker}.gnliu.workers.dev'},
+        'd1_databases': [{'binding': 'DB', 'database_name': worker, 'database_id': database}],
+    }, 'Unexpected media library deployment settings.')
+    check_installation(directory)
+    assets = directory / 'public'
+    html = (assets / 'index.html').read_text(encoding='utf-8')
+    manifest = json.loads((assets / 'manifest.webmanifest').read_text(encoding='utf-8'))
+    build = re.search(r'<meta name="app-build" content="([0-9a-f]{16})">', html)
+    apple = re.search(r'<link rel="apple-touch-icon" href="/(icons/app-180-[0-9a-f]{16}\.png)">', html)
+    require(build and apple and manifest.get('display') == 'standalone', 'Missing media library installation assets.')
+    icons = {apple.group(1)}
+    for icon in manifest.get('icons', []):
+        source = icon.get('src', '')
+        require(re.fullmatch(r'/icons/app-(192|512)-[0-9a-f]{16}\.png', source), 'Unexpected media library icon.')
+        icons.add(source[1:])
+    require(len(icons) == 3 and {icon.split('-')[1] for icon in icons} == {'180', '192', '512'}, 'Incomplete media library icons.')
+    for icon in icons:
+        digest = hashlib.sha256((assets / icon).read_bytes()).hexdigest()[:16]
+        require(icon.endswith(f'-{digest}.png'), 'Media library icon digest mismatch.')
+    expected = {'index.html', 'manifest.webmanifest', 'sw.js', *icons}
+    expected.update(f'_app/{build.group(1)}/{name}' for name in ('app.js', 'app.css', 'pwa-mode.js'))
+    actual = {file.relative_to(assets).as_posix() for file in assets.rglob('*') if file.is_file()}
+    require(actual == expected, 'Unexpected media library assets.')
+
+
 def check_dtr_worker(directory, worker, database):
     require(worker == 'dtr-mobile' and database != FIXTURE_DATABASE and
             re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', database),
@@ -291,13 +325,14 @@ def check_password_worker(directory, worker):
 def run():
     profile = os.environ.get('HANDOFF_PROFILE', 'production')
     require(profile in ('production', 'isolated', 'bound-worker', 'routed-worker', 'routed-worker-production',
-                        'spa-worker', 'spa-worker-production', 'ledger-worker-production', 'dtr-worker-production', 'password-worker-production'), 'Unknown Worker handoff profile.')
+                        'spa-worker', 'spa-worker-production', 'ledger-worker-production', 'dtr-worker-production', 'password-worker-production', 'media-library-production'), 'Unknown Worker handoff profile.')
     isolated = profile == 'isolated'
     extended = profile != 'production'
     spa = profile in ('spa-worker', 'spa-worker-production')
     ledger = profile == 'ledger-worker-production'
     dtr = profile == 'dtr-worker-production'
     password = profile == 'password-worker-production'
+    media_library = profile == 'media-library-production'
     publishing = os.environ.get('PUBLISH') == 'true'
     approval_output = os.environ.get('RECORD_ARTIFACT_APPROVAL') == 'true'
     require(not (publishing and approval_output), 'Artifact approval cannot deploy.')
@@ -319,13 +354,15 @@ def run():
         directory = Path(workspace)
         asset_dir = 'dist-worker' if password else 'dist' if spa or ledger or dtr else 'public'
         unpack_verified(data, artifact['digest'], directory, extended, asset_dir,
-                        ledger=ledger, dtr=dtr, password=password)
+                        ledger=ledger, dtr=dtr, password=password, media_library=media_library)
         if isolated:
             check_isolated_worker(directory, os.environ['WORKER_NAME'], os.environ['WORKER_DATABASE_ID'])
             print('Verified the isolated private artifact and its synthetic settings.')
             return
         settings = (directory, os.environ['WORKER_NAME'], os.environ['WORKER_DATABASE_ID'])
-        if password:
+        if media_library:
+            check_media_library(*settings)
+        elif password:
             check_password_worker(directory, os.environ['WORKER_NAME'])
         elif profile in ('routed-worker', 'routed-worker-production'):
             check_bound_worker(*settings, os.environ['WORKER_SERVICE'], os.environ['WORKER_ENTRYPOINT'])
