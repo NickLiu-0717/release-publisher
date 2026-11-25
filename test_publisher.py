@@ -118,6 +118,7 @@ class PublisherTests(TestCase):
             'ledger': ('ledger-worker-production', 'spa-worker-production'),
             'dtr': ('dtr-worker-production', 'bound-worker-production'),
             'password': ('password-worker-production', 'bound-worker-production'),
+            'media-library': ('media-library-production', 'bound-worker-production'),
         }
         declared = selection.split('        options:\n', 1)[1].split('      source_run:', 1)[0]
         self.assertEqual({line.strip().removeprefix('- ') for line in declared.splitlines()},
@@ -130,6 +131,7 @@ class PublisherTests(TestCase):
         self.assertIn('APPROVED_ARTIFACT: ${{ steps.approval.outputs.artifact }}', deploy)
         self.assertIn("profile == 'dtr-worker-production' && secrets.DTR_CLOUDFLARE_API_TOKEN || needs.select.outputs.profile != 'dtr-worker-production' && (", deploy)
         self.assertIn("profile == 'password-worker-production' && secrets.PASSWORD_CLOUDFLARE_API_TOKEN || needs.select.outputs.profile != 'password-worker-production' && (", deploy)
+        self.assertIn("profile == 'media-library-production' && secrets.MEDIA_LIBRARY_CLOUDFLARE_API_TOKEN || needs.select.outputs.profile != 'media-library-production' && (", deploy)
         self.assertEqual(workflow.count('name: Deploy privately built artifact'), 1)
         self.assertEqual(workflow.count('      - name: Verify privately built artifact'), 1)
         for other in workflow_directory.iterdir():
