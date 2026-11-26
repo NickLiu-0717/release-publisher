@@ -143,10 +143,12 @@ jobs:
       - if: inputs.publish
         env:
           APPROVED_ARTIFACT: ${{ steps.approval.outputs.artifact }}
+          # 4.156.2 fixes dashboard metadata lookup with a Worker-scoped token.
+          WRANGLER_VERSION: ${{ needs.select.outputs.profile == 'media-library-production' && '4.156.2' || '4.156.0' }}
         run: |
           [[ -n "$APPROVED_ARTIFACT" ]]
           node -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)'
-          npm install --prefix "$RUNNER_TEMP/wrangler" --ignore-scripts --no-audit --no-fund wrangler@4.156.0
+          npm install --prefix "$RUNNER_TEMP/wrangler" --ignore-scripts --no-audit --no-fund "wrangler@$WRANGLER_VERSION"
       - name: Deploy privately built artifact
         if: inputs.publish
         env:

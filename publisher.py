@@ -409,8 +409,6 @@ def run():
         env = {'PATH': os.environ['PATH'], 'CI': 'true', 'WRANGLER_SEND_METRICS': 'false',
                'XDG_CONFIG_HOME': str(directory / '.work'),
                'CLOUDFLARE_ACCOUNT_ID': account, 'CLOUDFLARE_API_TOKEN': credential}
-        if media_library:
-            env['WRANGLER_LOG'] = 'debug'
         diagnostics = {'stdout': subprocess.PIPE, 'stderr': subprocess.STDOUT, 'encoding': 'utf-8', 'errors': 'replace'} if media_library else {
             'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL
         }
