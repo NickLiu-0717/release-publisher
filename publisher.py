@@ -329,6 +329,10 @@ def redacted_worker_failure(output):
     categories = [name for name, pattern in (
         ('authentication', r'authentication error|invalid api token|unauthorized'),
         ('permissions', r'permission denied|forbidden|not authorized|insufficient permission'),
+        ('dashboard-metadata', r'Unable to fetch bindings, routes, or services metadata from the dashboard'),
+        ('dashboard-conflict', r'Aborting the upload operation because of conflicts'),
+        ('worker-domains', r'/workers/domains/records'),
+        ('network', r'fetch failed|\b(?:ENOTFOUND|ECONNRESET|ETIMEDOUT)\b'),
         ('assets', r'assets-upload-session|asset upload|uploading assets'),
         ('version', r'/versions|upload version'),
         ('script', r'/workers/scripts/'),
@@ -405,6 +409,8 @@ def run():
         env = {'PATH': os.environ['PATH'], 'CI': 'true', 'WRANGLER_SEND_METRICS': 'false',
                'XDG_CONFIG_HOME': str(directory / '.work'),
                'CLOUDFLARE_ACCOUNT_ID': account, 'CLOUDFLARE_API_TOKEN': credential}
+        if media_library:
+            env['WRANGLER_LOG'] = 'debug'
         diagnostics = {'stdout': subprocess.PIPE, 'stderr': subprocess.STDOUT, 'encoding': 'utf-8', 'errors': 'replace'} if media_library else {
             'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL
         }
