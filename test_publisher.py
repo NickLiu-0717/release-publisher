@@ -15,6 +15,16 @@ SHA = 'a' * 40
 DATABASE = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
 
 
+class RedactedFailureTests(TestCase):
+    def test_cloudflare_failure_reports_only_fixed_categories_and_numeric_codes(self):
+        output = '\x1b[31mA request to /accounts/private-account/workers/scripts/private-script/assets-upload-session ' \
+                 'failed with HTTP 403: Permission denied; key private-credential [code: 10000]\x1b[0m'
+        self.assertEqual(publisher.redacted_worker_failure(output),
+                         'Cloudflare codes: 10000; HTTP: 403; stage: permissions,assets,script.')
+        self.assertEqual(publisher.redacted_worker_failure('private-token'),
+                         'Cloudflare codes: unknown; HTTP: unknown; stage: unknown.')
+
+
 def package(**extra):
     config = {'assets': {'directory': './public', 'binding': 'ASSETS', 'run_worker_first': ['/api/*']},
               'compatibility_date': '2026-01-01', 'compatibility_flags': [], 'keep_vars': True,
