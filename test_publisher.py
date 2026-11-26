@@ -24,6 +24,12 @@ class RedactedFailureTests(TestCase):
         self.assertEqual(publisher.redacted_worker_failure('private-token'),
                          'Cloudflare codes: unknown; HTTP: unknown; stage: unknown.')
 
+    def test_wrapped_dashboard_error_reports_a_fixed_label(self):
+        output = ('Error Occurred: Unable to fetch bindings, routes, or services metadata from the dashboard.\n'
+                  'GET /accounts/private-account/workers/domains/records?service=private-service')
+        self.assertEqual(publisher.redacted_worker_failure(output),
+                         'Cloudflare codes: unknown; HTTP: unknown; stage: dashboard-metadata,worker-domains.')
+
 
 def package(**extra):
     config = {'assets': {'directory': './public', 'binding': 'ASSETS', 'run_worker_first': ['/api/*']},
