@@ -322,6 +322,23 @@ def check_password_worker(directory, worker):
     require(actual == expected, 'Unexpected password Worker assets.')
 
 
+def redacted_worker_failure(output):
+    plain = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', output or '')
+    codes = list(dict.fromkeys(re.findall(r'\[code:\s*(\d{3,7})\]', plain)))[:5]
+    status = list(dict.fromkeys(re.findall(r'\b(?:HTTP(?: status)?|status code)[:\s]+([45]\d{2})\b', plain, re.I)))[:5]
+    categories = [name for name, pattern in (
+        ('authentication', r'authentication error|invalid api token|unauthorized'),
+        ('permissions', r'permission denied|forbidden|not authorized|insufficient permission'),
+        ('assets', r'assets-upload-session|asset upload|uploading assets'),
+        ('version', r'/versions|upload version'),
+        ('script', r'/workers/scripts/'),
+        ('bindings', r'invalid binding|binding validation|already exists as a secret|keep_bindings'),
+        ('subdomain', r'/subdomain|workers\.dev subdomain'),
+    ) if re.search(pattern, plain, re.I)]
+    return 'Cloudflare codes: {}; HTTP: {}; stage: {}.'.format(
+        ','.join(codes) or 'unknown', ','.join(status) or 'unknown', ','.join(categories) or 'unknown')
+
+
 def run():
     profile = os.environ.get('HANDOFF_PROFILE', 'production')
     require(profile in ('production', 'isolated', 'bound-worker', 'routed-worker', 'routed-worker-production',
@@ -388,8 +405,13 @@ def run():
         env = {'PATH': os.environ['PATH'], 'CI': 'true', 'WRANGLER_SEND_METRICS': 'false',
                'XDG_CONFIG_HOME': str(directory / '.work'),
                'CLOUDFLARE_ACCOUNT_ID': account, 'CLOUDFLARE_API_TOKEN': credential}
+        diagnostics = {'stdout': subprocess.PIPE, 'stderr': subprocess.STDOUT, 'encoding': 'utf-8', 'errors': 'replace'} if media_library else {
+            'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL
+        }
         result = subprocess.run(['node', os.environ['WRANGLER_BIN'], 'deploy', '--config', 'wrangler.json', '--no-bundle'],
-                                cwd=directory, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)
+                                cwd=directory, env=env, timeout=180, **diagnostics)
+        if media_library and result.returncode:
+            print(redacted_worker_failure(result.stdout), flush=True)
         require(result.returncode == 0, 'Cloudflare deployment did not report success; inspect Cloudflare before retrying.')
         print('Cloudflare deployment succeeded.')
 
